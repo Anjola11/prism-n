@@ -8,7 +8,7 @@ import { OTPPage } from './pages/auth/OTPPage';
 import { AppLayout } from './components/layout/AppLayout';
 import { DiscoveryPage } from './pages/app/DiscoveryPage';
 import { TrackerPage } from './pages/app/TrackerPage';
-import { MarketAnalysisPage } from './pages/app/MarketAnalysisPage';
+import { EventDetail } from './pages/app/EventDetail';
 
 export const rootRoute = createRootRoute({
   component: () => <Outlet />,
@@ -69,8 +69,8 @@ export const trackerRoute = createRoute({
 
 export const analysisRoute = createRoute({
   getParentRoute: () => appRoute,
-  path: '/markets/$marketId',
-  component: MarketAnalysisPage,
+  path: '/events/$marketId',
+  component: EventDetail,
 });
 
 const appRouteWithChildren = appRoute.addChildren([discoverRoute, trackerRoute, analysisRoute]);

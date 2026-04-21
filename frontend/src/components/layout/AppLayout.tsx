@@ -32,10 +32,6 @@ export function AppLayout() {
 
         {/* Right Section */}
         <div className="flex items-center gap-4">
-          <div className="hidden md:inline-flex items-center gap-2 border border-noise/30 bg-noise-bg rounded-full px-2 py-0.5">
-             <div className="w-1.5 h-1.5 rounded-full bg-noise animate-pulse-slow" />
-             <span className="font-mono text-[10px] text-noise">LIVE</span>
-          </div>
           <div className="w-8 h-8 rounded-full bg-prism-blue/20 border border-prism-blue/40 flex items-center justify-center cursor-pointer" onClick={() => navigate({ to: '/' })}>
             <span className="font-mono text-xs text-prism-cyan">DM</span>
           </div>

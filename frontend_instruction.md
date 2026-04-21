@@ -3,8 +3,8 @@
 ### For AI Agent Implementation — Revised Product Structure
 
 **Stack:** React JSX · Tailwind CSS · TanStack Query · TanStack Router · GSAP · D3 · Three.js  
-**Auth:** Cookie-based session · Email OTP flow · No localStorage / sessionStorage  
-**Product Structure:** Landing → Auth (Email → OTP) → Discovery → Tracker → Market Analysis  
+**Auth:** Email & Password based · OTP for verification · HttpOnly Cookies · No localStorage  
+**Product Structure:** Landing → Signup/Login → OTP (Verification) → Discovery → Tracker → Market Analysis  
 **Approach:** Modular, mobile-first, component-driven  
 **Version:** 2.0 — Clean Product Build
 
@@ -1020,15 +1020,39 @@ const landingRoute = createRoute({
   path: "/",
   component: LandingPage,
 });
-const emailRoute = createRoute({
+
+// Signup Flow
+const signupRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: "/auth",
-  component: EmailPage,
+  path: "/auth/signup",
+  component: SignupPage,
 });
+
+// Login Flow
+const loginRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/auth/login",
+  component: LoginPage,
+});
+
+// OTP Verification (Required after signup or for password reset)
 const otpRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/auth/otp",
   component: OTPPage,
+});
+
+// Password Recovery
+const forgotPasswordRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/auth/forgot-password",
+  component: ForgotPasswordPage,
+});
+
+const resetPasswordRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/auth/reset-password",
+  component: ResetPasswordPage,
 });
 
 // ── PROTECTED ROUTES (require valid session cookie) ──
@@ -1057,17 +1081,17 @@ const analysisRoute = createRoute({
 
 **Route Guards:**
 
-- In `AppLayout.jsx`: call `useAuth()`. While `isLoading`, render the `<PrismLoader />` inline (not the full-screen version — a smaller in-content spinner). If `!isAuthenticated`, call `router.navigate({ to: '/auth' })`. If authenticated, render children.
-- Public routes (`/`, `/auth`, `/auth/otp`): if user IS authenticated, redirect to `/app`.
+- In `AppLayout.jsx`: call `useAuth()`. While `isLoading`, render the `<PrismLoader />` inline. If `!isAuthenticated`, call `router.navigate({ to: '/auth/login' })`. If authenticated, render children.
+- Public routes (`/`, `/auth/signup`, `/auth/login`, `/auth/otp`): if user IS authenticated, redirect to `/app`.
 
-**OTP route state:** The email address is passed from EmailPage to OTPPage via TanStack Router's search params: `/auth/otp?email=user@example.com`. Never via localStorage.
+**OTP route state:** The user identifier (`uid`) and `email` are passed to OTPPage via TanStack Router's search params: `/auth/otp?email=user@example.com&uid=xyz&type=signup`. Never via localStorage.
 
 ```js
-// EmailPage — on submit:
-router.navigate({ to: "/auth/otp", search: { email: emailValue } });
+// SignupPage — on submit success:
+router.navigate({ to: "/auth/otp", search: { email: emailValue, uid: response.data.uid, type: 'signup' } });
 
 // OTPPage — reading it:
-const { email } = Route.useSearch();
+const { email, uid, type } = Route.useSearch();
 ```
 
 ---
@@ -1745,18 +1769,18 @@ Bottom: "© 2025 Prism · Signal Intelligence Engine" text-text-muted text-xs fo
 
 ---
 
-## 10. AUTH FLOW — EMAIL → OTP
+## 10. AUTH FLOW — SIGNUP / LOGIN / VERIFY
 
 ### Overview
 
-Authentication is a two-step process with two separate pages:
+Prism uses a secure, multi-stage authentication system powered by Email and Passwords, enforced by OTP (One-Time Password) verification for critical actions (first-time signup and password recovery).
 
-1. `/auth` — enter email → POST to backend → OTP sent to inbox
-2. `/auth/otp?email=...` — enter 6-digit OTP → verified → cookie set → redirect to `/app`
+1. **Signup**: `/auth/signup` — Create account with Email/Password → OTP sent to inbox.
+2. **Verification**: `/auth/otp` — Enter 6-digit code to activate account.
+3. **Login**: `/auth/login` — Enter credentials → HttpOnly session cookies set → Redirect to `/app`.
+4. **Password Recovery**: `/auth/forgot-password` → OTP → `/auth/reset-password`.
 
-There is no password. No Google OAuth. No magic link. Email → OTP → in.
-
-Both pages share a common visual shell.
+Success is always defined by the presence of a double HttpOnly cookie set (`access_token` and `refresh_token`).
 
 ---
 
@@ -1764,209 +1788,81 @@ Both pages share a common visual shell.
 
 **Background:** Full-screen `bg-void`. No topbar, no nav.
 
-**Background decoration:** A large, low-opacity prism SVG (the logo icon, `size=480`, `opacity-[0.03]`) positioned `absolute -right-40 top-1/2 -translate-y-1/2` — visible only on desktop. It creates depth without distraction.
+**Background decoration:** A large, low-opacity prism SVG (the logo icon, `size=480`, `opacity-[0.03]`) positioned `absolute -right-40 top-1/2 -translate-y-1/2` — visible only on desktop.
 
 **Card wrapper:**
-
 ```
 min-h-screen flex items-center justify-center px-4
 Card: bg-navy border border-border rounded-2xl p-8 md:p-10
       w-full max-w-[420px] shadow-modal
-      position: relative (for any absolute decorations)
-```
-
-**Card top:**
-
-```
-PrismLogo size=32 mx-auto mb-8 (centered)
-Below logo: a 1px horizontal line using the spectrum gradient, w-full, opacity-40
 ```
 
 ---
 
-### EmailPage.jsx
+### Phase 1: SignupPage.jsx
 
-**Route:** `/auth`
+**Route:** `/auth/signup`
 
-**Content inside card:**
+**Purpose:** Initial onboarding.
+**Form Inputs:**
+- Email (`type="email"`)
+- Password (`type="password"`)
+- Confirm Password (`type="password"`)
 
-**Step indicator:**
-
-```
-"Step 1 of 2" — font-mono text-xs text-text-muted tracking-wide
-Two dots: [●] [○] — active dot bg-prism-blue w-2 h-2 rounded-full, inactive bg-border
-flex items-center gap-2 mb-6
-```
-
-**Heading:**
-
-```
-"Enter your email address"
-font-heading font-semibold text-text-primary text-xl text-center
-```
-
-**Subtext:**
-
-```
-"We'll send a one-time code to sign you in. No password required."
-font-body text-sm text-text-secondary text-center mt-2 mb-8
-```
-
-**Form (no `<form>` tag — use div + button):**
-
-```
-Email input:
-  <Input
-    label="Email address"
-    type="email"
-    placeholder="you@example.com"
-    autoComplete="email"
-    autoFocus
-    value={email}
-    onChange={setEmail}
-    error={error}  ← shows if email is invalid format
-  />
-
-Submit button (full width, mt-4):
-  <Button variant="primary" size="lg" loading={isSending} loadingText="Sending code…" onClick={handleSend}>
-    Send One-Time Code
-  </Button>
-
-On submit:
-  1. Validate email format client-side (regex). If invalid → set error state, GSAP shake input
-  2. If valid → api.post('/auth/otp/send', { email }) → setIsSending(true)
-  3. On success → router.navigate({ to: '/auth/otp', search: { email } })
-  4. On API error → set error message below button:
-       "Could not send code. Check your email and try again."
-       text-noise text-xs font-body mt-2 text-center
-       GSAP shake card: gsap.fromTo(card, {x:0}, {x:[-6,6,-4,4,-2,2,0], duration:0.4})
-```
-
-**GSAP entrance animation (on mount):**
-
-```
-Card:    fromTo { opacity:0, y:20 } → { opacity:1, y:0, duration:0.4, ease:'power2.out' }
-Logo:    fromTo { opacity:0, scale:0.9 } → { opacity:1, scale:1, duration:0.35 }
-Heading: fromTo { opacity:0 } → { opacity:1, duration:0.3, delay:0.15 }
-Input:   fromTo { opacity:0, y:8 } → { opacity:1, y:0, duration:0.3, delay:0.25 }
-Button:  fromTo { opacity:0, y:8 } → { opacity:1, y:0, duration:0.3, delay:0.35 }
-```
+**Logic:**
+1. Call `POST /api/v1/auth/signup`.
+2. On success, backend sends a verification OTP to the email.
+3. API returns `{ success: true, message: "...", data: { uid: "...", email: "..." } }`.
+4. Frontend logic: `router.navigate({ to: '/auth/otp', search: { email, uid: response.data.uid, type: 'signup' } })`.
 
 ---
 
-### OTPPage.jsx
+### Phase 2: OTPPage.jsx (Verification)
 
-**Route:** `/auth/otp?email=...`
+**Route:** `/auth/otp?email=...&uid=...&type=signup`
 
-**On mount:** Read `email` from search params. If no email param, redirect to `/auth`.
+**Purpose:** Verify the user identity via the 6-digit code sent to their inbox.
 
-**Content inside card:**
+**UI:** 
+- A custom 6-box numeric input.
+- "Verified" welcome email is triggered by the backend upon successful verification code entry.
 
-**Step indicator:** Same as EmailPage but step 2 active:
+**Logic:**
+1. Call `POST /api/v1/auth/verify-otp`.
+2. Payload: `{ uid, otp, otp_type: 'signup' }`. (Pass the correct type from URL).
+3. On success: Verification complete. The user account is now "Verified".
+4. Frontend logic: Redirect to `/auth/login` with a success toast: "Account verified! Please sign in."
 
-```
-"Step 2 of 2"  [● ●] both dots active (second one is prism-blue)
-```
+---
 
-**Back link:**
+### Phase 3: LoginPage.jsx
 
-```
-"← Change email" — text-text-muted text-xs font-mono hover:text-text-secondary
-onClick → router.navigate('/auth')
-Position: above the heading, mb-4
-```
+**Route:** `/auth/login`
 
-**Heading:**
+**Purpose:** Authenticate an existing, verified user.
+**Form Inputs:**
+- Email
+- Password
 
-```
-"Enter your code"
-font-heading font-semibold text-text-primary text-xl text-center
-```
+**Logic:**
+1. Call `POST /api/v1/auth/login`.
+2. Success: The backend sets two HttpOnly cookies (`access_token`, `refresh_token`).
+3. Payload: Returns basic user data in `data`.
+4. Frontend logic:
+   - Call `queryClient.setQueryData(['session'], response.data.data)`.
+   - `router.navigate({ to: '/app' })`.
 
-**Subtext:**
+---
 
-```
-"We sent a 6-digit code to"  [email address in text-prism-cyan font-mono]
-"It expires in 10 minutes."
-font-body text-sm text-text-secondary text-center mt-2 mb-8
-```
+### Phase 4: Password Recovery
 
-**OTP Input (OTPInput.jsx):**
-
-This is a custom 6-box OTP input. Each digit gets its own individual input box.
-
-```jsx
-// OTPInput.jsx
-// Props: value (string, 6 chars), onChange (fn), error (bool), autoFocus (bool)
-
-// Layout: flex gap-2 justify-center
-
-// Each box:
-//   w-12 h-14 (desktop) / w-10 h-12 (mobile)
-//   bg-navy-mid border border-border rounded-xl
-//   text-center font-mono text-xl font-bold text-text-primary
-//   caret-prism-blue
-//   focus: border-prism-blue ring-1 ring-prism-blue/30 outline-none
-//   If error: border-noise
-//   transition-all duration-150
-
-// Behavior:
-//   - Each input accepts exactly 1 character (type="text" maxLength=1 inputMode="numeric")
-//   - On input: auto-focus next box
-//   - On backspace with empty box: focus previous box
-//   - On paste: distribute digits across all 6 boxes
-//   - On complete (6 digits entered): auto-submit (call onComplete prop)
-
-// GSAP: when error fires → shake all 6 boxes together
-//   gsap.fromTo(boxRefs, {x:0}, {x:[-5,5,-4,4,-2,2,0], duration:0.35, stagger:0.02})
-```
-
-**Submit button:**
-
-```
-<Button variant="primary" size="lg" loading={isVerifying} loadingText="Verifying…" onClick={handleVerify}>
-  Verify & Sign In
-</Button>
-
-Auto-triggers when 6 digits entered (no manual click needed for the happy path)
-```
-
-**Resend code:**
-
-```
-Below button, mt-6 text-center:
-
-If countdown > 0 (60s countdown from arrival):
-  "Resend code in {countdown}s" — text-text-muted text-sm font-body
-  countdown: useEffect with setInterval, starts at 60, counts to 0
-
-If countdown === 0:
-  "Didn't get the code?" text-text-muted text-sm inline
-  "Resend" — text-prism-blue text-sm font-body hover:underline inline ml-1
-  onClick → api.post('/auth/otp/send', {email}) again → reset countdown to 60
-            Show a subtle toast: "Code resent to {email}" (success variant)
-```
-
-**Verification logic:**
-
-```
-1. When 6 digits complete → auto-call handleVerify
-2. api.post('/auth/otp/verify', { email, otp }) → setIsVerifying(true)
-3. On success: server sets httpOnly cookie
-   → Show full-screen PrismLoader (the full animation version) for 1.8s
-   → Then router.navigate('/app')
-4. On error (wrong OTP):
-   → Clear all 6 OTP boxes (reset to empty)
-   → GSAP shake animation on boxes
-   → Error message below boxes: "Invalid code. Try again or resend."
-     text-noise text-xs font-body text-center mt-2
-   → Re-focus first box
-5. On error (expired OTP):
-   → Same shake + "This code has expired. Request a new one."
-   → Show "Resend" immediately (set countdown to 0)
-```
-
-**GSAP entrance (same pattern as EmailPage with same timing).**
+**Flow:**
+1. **Request**: `/auth/forgot-password` → `POST /api/v1/auth/forgot-password` with `{ email }`.
+2. **Verify**: User redirected back to `/auth/otp` with `type=forgotpassword`.
+3. **Reset Token**: On successful OTP verification (`otp_type: 'forgotpassword'`), the backend returns a `reset_token` in the data object.
+4. **Update**: Redirect to `/auth/reset-password?token=...`.
+5. **Execute**: Submit `new_password` and `reset_token` to `POST /api/v1/auth/reset-password`.
+6. **Finish**: Return to Login.
 
 ---
 
@@ -2065,7 +1961,7 @@ Tab switch:
 
 ---
 
-### Market Cards Grid (MarketCard.jsx)
+### Market Cards Grid (SignalCard.jsx)
 
 ```
 Grid layout:
@@ -2076,18 +1972,18 @@ Grid layout:
 mt-6 for the grid
 ```
 
-**MarketCard.jsx:**
+**SignalCard.jsx/tsx:**
 
 ```jsx
 /**
- * MarketCard
- * Used on the Discovery page.
- * Shows a market with light signal intelligence + Track button.
+ * SignalCard
+ * Universal card component used on Discovery and Tracker pages.
+ * Handles both Single Markets (Yes/No) and Combined Markets (Multiple candidates).
  *
  * Props:
- *   market {object}  — market data including signal if available
- *   onTrack {fn}     — called when "+ Track Market" is clicked
- *   isTracked {bool} — if user already tracks this market
+ *   event {object}   — umbrella event data including type and highest scoring market
+ *   onTrack {fn}     — called when "+ Track" is clicked (tracks event_id)
+ *   isTracked {bool} — if user already tracks this event
  *   isAdding {bool}  — loading state for track mutation
  */
 ```
@@ -2099,12 +1995,12 @@ Container:
   bg-navy-mid border border-border rounded-xl p-5
   hover: border-border-bright shadow-card cursor-pointer
   transition-all duration-200
-  If market.signal.classification === 'INFORMED_MOVE': border-l-[3px] border-l-informed
-  If market.signal.classification === 'NOISE':         border-l-[3px] border-l-noise
-  If market.signal.classification === 'UNCERTAIN':     border-l-[3px] border-l-uncertain
+  If event.signal.classification === 'INFORMED_MOVE': border-l-[3px] border-l-informed
+  If event.signal.classification === 'NOISE':         border-l-[3px] border-l-noise
+  If event.signal.classification === 'UNCERTAIN':     border-l-[3px] border-l-uncertain
   If no signal: no left border override
 
-  onClick → router.navigate({ to: '/app/markets/$marketId', params: { marketId: market.id } })
+  onClick → router.navigate({ to: '/app/events/$eventId', params: { eventId: event.id } })
   Note: clicking the Track button does NOT navigate — e.stopPropagation() on button
 
 ─── TOP ROW ───
@@ -2112,12 +2008,18 @@ flex justify-between items-start gap-3
 
   Left:
     SourceBadge (Polymarket / Bayse)
-    Market title: font-heading font-semibold text-text-primary text-sm leading-snug mt-1.5
+    Event title: font-heading font-semibold text-text-primary text-sm leading-snug mt-1.5
       max 2 lines: overflow-hidden, display: -webkit-box, -webkit-line-clamp: 2
-    Category tag (if available): "Politics · Nigeria" — font-mono text-xs text-text-muted mt-1
+    
+    Target Subtitle (Conditional rendering):
+      If event.event_type === 'combined': 
+        "↳ Spiking on: {event.highest_scoring_market_name} (Score: {event.highest_scoring_market_score})"
+        font-mono text-xs text-prism-teal mt-1
+      If event.event_type === 'single':
+        Render hidden or subtle "↳ Moving on: YES"
 
   Right:
-    If signal exists: <ScoreBadge score={market.signal.score} size="sm" />
+    If signal exists: <ScoreBadge score={event.highest_scoring_market_score} size="sm" />
     If no signal: empty, no placeholder
 
 ─── MIDDLE ROW (signal data, only if signal exists) ───
@@ -2323,80 +2225,12 @@ Error: ErrorState with retry
 
 ---
 
-### TrackerCard.jsx
+### TrackerCard.jsx -> Now Reuses SignalCard.jsx
 
-```jsx
-/**
- * TrackerCard
- * Used on Tracker page. More information-dense than MarketCard.
- * Clickable → navigates to /app/markets/:id for full analysis
- *
- * Props:
- *   market    {object}  — tracked market with latest signal
- *   onRemove  {fn}      — called when remove is triggered
- *   isRemoving {bool}   — loading state for remove mutation
- *   removeMode {bool}   — shows remove button if true
- */
-```
+The Tracker page functions identically to the Discovery Page feed but acts as the user's customized radar.
+Instead of a separate TrackerCard, use the EXACT conditional `<SignalCard />` component from above.
 
-**Card structure:**
-
-```
-Container:
-  bg-card border border-border rounded-xl p-5 cursor-pointer
-  hover: border-border-bright shadow-card
-  transition-all duration-200
-  onClick → router.navigate('/app/markets/$marketId')
-
-  Left border by classification (3px):
-    INFORMED_MOVE: border-l-[3px] border-l-informed
-    UNCERTAIN:     border-l-[3px] border-l-uncertain
-    NOISE:         border-l-[3px] border-l-noise
-
-─── TOP ROW ───
-flex justify-between items-start gap-3
-
-  Left:
-    flex items-center gap-2:
-      <SourceBadge source={market.source} />
-      <DirectionArrow direction={scoreDirection} delta={scoreDelta} compact />
-    Market title: font-heading font-semibold text-text-primary text-sm mt-1.5 line-clamp-2
-
-  Right:
-    <ScoreBadge score={market.signal.score} size="md" showRing />
-    (the larger badge — this is the hero element of the card)
-
-─── SIGNAL ROW ───
-mt-3 pt-3 border-t border-border/60 flex items-center justify-between
-
-  Left:
-    <ClassificationChip classification={market.signal.classification} size="sm" />
-
-  Right:
-    Probability: "{currentProb}%" — font-mono font-bold text-text-primary text-xl
-    Delta: "+{delta}%" — font-mono text-xs (text-informed for positive, text-noise for negative)
-    flex flex-col items-end
-
-─── DATA ROW ───
-mt-3 flex gap-5 flex-wrap
-
-  [Droplets 12px text-text-muted] "₦{liquidity}" font-mono text-xs text-text-secondary
-  [Users 12px]                    "{orders} orders"
-  [Zap 12px]                      "{volRatio}× vol"
-  [Clock 12px]                    "{timeAgo}"
-
-─── AI INSIGHT (if INFORMED_MOVE) ───
-mt-3 pt-3 border-t border-informed/20 bg-informed-bg/30 rounded-lg px-3 py-2
-
-  [Sparkles 12px text-informed]
-  insight text: font-body text-xs italic text-text-secondary line-clamp-2
-
-─── NO SIGNAL / COLD STATE ───
-When no signal in last 24h:
-  Middle row: "No movement detected in the last 24 hours"
-    font-mono text-xs text-text-muted italic
-  Score badge shows last known score but with reduced opacity (0.5) and no glow
-  Left border: border-l-border (neutral, no classification color)
+Data logic: Ensure TanStack Query is actively polling the backend for these specific tracked events every 30-60 seconds.
 
 ─── REMOVE MODE (when removeMode === true) ───
 Overlay appears on card (position absolute inset-0 bg-navy/80 backdrop-blur-sm rounded-xl):
@@ -2446,53 +2280,82 @@ Above the card list, flex justify-between items-center:
 
 ---
 
-## 13. MARKET ANALYSIS PAGE
+## 13. EVENT ANALYSIS PAGE
 
-**File:** `src/pages/app/MarketAnalysisPage.jsx`
-**Route:** `/app/markets/$marketId`
+**File:** `src/pages/app/EventDetail.tsx`
+**Route:** `/app/events/$eventId`
 **Layout:** AppLayout
 
 ### Purpose
 
-The most important page in the product. When a user clicks a card, this is the payoff. They must leave this page feeling: _"I now understand this market better than anyone who hasn't used Prism."_
-
-The page is a vertically-stacked analysis document. Each section is clearly labeled, progressively more detailed, and ends with the AI interpretation and an action-level summary.
+The quantitative dashboard. By using a tabbed layout, this single page template seamlessly handles both Single and Combined markets automatically.
 
 ---
 
-### Page Header & Breadcrumb
+### Section A: The Header (Aggregate View)
 
 ```
 max-w-4xl mx-auto px-6 pt-6
 
 Breadcrumb:
-  "Tracker → {market.title truncated to 30 chars}" — font-mono text-xs text-text-muted
+  "Tracker → {event.title truncated to 30 chars}" — font-mono text-xs text-text-muted
   "/" separator: text-text-dim
   "← Back" on the left: font-mono text-xs text-text-muted hover:text-text-secondary
     onClick → router.history.back()
 
-Market title (full, not truncated):
+Event Title:
   font-heading font-bold text-text-primary
   font-size: clamp(1.4rem, 2.5vw, 2rem)
   line-height: 1.2
   mt-3
 
 Meta row (flex items-center gap-4 mt-2 flex-wrap):
-  <SourceBadge source={market.source} />
-  <ClassificationChip classification={signal.classification} size="md" />
-  <DirectionArrow direction={direction} delta={deltaP} />
+  <SourceBadge source={event.source} />
+  Event Heat Score: <ScoreBadge score={event.highest_scoring_market.score} size="md" /> (Max score of all children)
+  "Total Pool: ₦{totalLiquidity}" — font-mono text-xs text-text-muted
   "Updated {timeAgo}" — font-mono text-xs text-text-muted
-
-Track/Untrack button (right-aligned on desktop, below meta on mobile):
-  If tracked: "✓ Tracked" button — ghost sm with CheckCircle icon, text-informed border-informed/40
-    onClick → shows remove confirm (inline, not modal — button expands to "Are you sure? [Remove] [Cancel]")
-  If not tracked: "+ Track Market" — outline button sm
-    onClick → trackMutation.mutate(marketId)
 ```
 
 ---
 
-### Section 1 — Main Signal (Hero Panel)
+### Section B: The AI Insight (Conditional Context)
+
+```
+mt-4 bg-navy-mid border border-prism-blue/25 rounded-2xl p-6
+A 1px left border in gradient: linear-gradient(#7C3AED, #06B6D4) — 3px width
+
+Section header:
+  [Sparkles icon text-prism-cyan] "AI INTERPRETATION" font-mono xs uppercase tracking-wide
+  Right: "Powered by Google Gemini" — font-mono text-[10px] text-text-dim
+
+Insight text:
+  blockquote style — pl-4 border-l-2 border-prism-blue/40
+  font-body italic text-text-primary text-[0.9375rem] line-height 1.75
+  
+  If Combined Market: The AI describes the relationship/tug-of-war (e.g., "Money is rapidly exiting France and flowing into Argentina with heavy volume...").
+  If Single Market: The AI describes the directional momentum (e.g., "Heavy institutional volume is accumulating on the YES contract...").
+```
+
+---
+
+### Section C: The Outcomes Navigation (The Universal Tab Bar)
+
+```
+Implement a horizontal, scrollable tab menu below the AI insight.
+
+If Combined Market: The tabs are the candidates. 
+  [ Argentina (88) ] [ France (42) ] [ England (12) ]
+If Single Market: The tabs are the two sides of the contract.
+  [ YES (79) ] [ NO (12) ]
+
+Auto-Select Logic: On page load, React automatically sets the "Active Tab" to the outcome with the highest score.
+```
+
+---
+
+### Section D: The Outcome Details (Dynamic Panel)
+
+Everything below the tab bar is a dynamic panel controlled entirely by the selected tab. When a user clicks "France" or "YES", this section instantly swaps data.
 
 ```
 mt-6 bg-card border border-border rounded-2xl p-6 md:p-8
@@ -2503,41 +2366,20 @@ If NOISE: border-noise/30 bg-noise-bg/20
 Layout: flex flex-col md:flex-row gap-6 items-center md:items-start
 
 ─── LEFT — SCORE GAUGE ───
-<ScoreGauge score={signal.score} size={180} />
+<ScoreGauge score={selectedTab.signal.score} size={180} />
 Below gauge: <ClassificationChip size="md" /> centered
-
-ScoreGauge (D3 arc gauge):
-  Outer arc: full 270° arc (from 135° to 45°), color var(--c-border), strokeWidth 8
-  Inner arc: filled from start to (score/100 * 270°), color by classification (informed/uncertain/noise)
-  Both arcs: rounded stroke linecaps
-  Animated on mount: arc draws from 0 to full value, duration 0.9s ease-out
-  Center text: score number in DM Mono font-bold, 2.5rem
-  Below center: "/ 100" in text-text-muted text-sm font-mono
 
 ─── RIGHT — SIGNAL SUMMARY ───
 flex flex-col gap-4
 
-Heading: "Signal Summary" — font-mono text-xs text-text-muted uppercase tracking-wide
-
-Classification banner:
-  If INFORMED_MOVE:
-    bg-informed border-0 text-void rounded-lg px-4 py-3 font-mono font-bold text-sm
-    "● INFORMED MOVE"
-  If UNCERTAIN:
-    bg-uncertain text-void (same pattern)
-  If NOISE:
-    bg-noise text-white (same pattern)
-
 Probability movement:
-  "{prevProb}% → {currProb}%" — font-mono font-bold text-text-primary text-3xl
+  "{selectedTab.prevProb}% → {selectedTab.currProb}%" — font-mono font-bold text-text-primary text-3xl
   Delta: "+{deltaP}% change" — font-mono text-sm, colored by direction
-  "in the last detection window" — font-mono text-xs text-text-muted
 
 Three quick metrics (flex row):
   "Liquidity" | "Volume" | "Orders"
   Value: font-mono font-bold text-text-primary text-xl
   Label: font-mono text-xs text-text-muted
-  Thin border-r border-border between each (no border on last)
 ```
 
 ---
@@ -3066,12 +2908,14 @@ useEffect(() => {
 
 **File:** `src/lib/api.js`
 
+**Main Endpoint:** `https://prism-60b21aab4083.herokuapp.com/api/v1`
+
 ```js
 import axios from "axios";
 
 const api = axios.create({
-  baseURL: import.meta.env.VITE_API_URL,
-  withCredentials: true, // ← sends httpOnly session cookie on every request
+  baseURL: "https://prism-60b21aab4083.herokuapp.com/api/v1",
+  withCredentials: true, // ← CRITICAL: sends httpOnly session cookies
   headers: { "Content-Type": "application/json" },
   timeout: 15_000,
 });
@@ -3080,9 +2924,9 @@ const api = axios.create({
 api.interceptors.response.use(
   (res) => res,
   (err) => {
-    if (err.response?.status === 401) {
-      // Clear TanStack Query cache + hard redirect (prevents stale data flash)
-      window.location.href = "/auth";
+    // If not on an auth page and we get a 401, the session is dead
+    if (err.response?.status === 401 && !window.location.pathname.startsWith('/auth')) {
+      window.location.href = "/auth/login";
     }
     return Promise.reject(err);
   },
@@ -3091,12 +2935,7 @@ api.interceptors.response.use(
 export default api;
 ```
 
-**Critical CORS requirement:** The backend must set:
-
-```
-Access-Control-Allow-Credentials: true
-Access-Control-Allow-Origin: https://your-frontend-domain.com   ← NOT '*'
-```
+---
 
 ### Auth Hook
 
@@ -3105,55 +2944,42 @@ Access-Control-Allow-Origin: https://your-frontend-domain.com   ← NOT '*'
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import api from "../lib/api";
 
-// Validates session cookie with backend on every mount
+// Validates session cookie with backend
 export function useAuth() {
   const { data, isLoading, isError } = useQuery({
     queryKey: ["session"],
     queryFn: () => api.get("/auth/me").then((r) => r.data),
     retry: false,
     staleTime: 5 * 60 * 1000,
-    gcTime: 10 * 60 * 1000,
   });
   return {
-    user: data?.user ?? null,
-    isAuthenticated: !!data?.user,
+    user: data?.data ?? null,
+    isAuthenticated: !!data?.data,
     isLoading,
     isError,
   };
-}
-
-export function useLogout() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: () => api.post("/auth/logout"),
-    onSuccess: () => {
-      qc.clear();
-      window.location.href = "/";
-    },
-  });
 }
 ```
 
 ### Auth Flow API Calls
 
 ```js
-// EmailPage:
-api.post("/auth/otp/send", { email });
-// → backend sends OTP email, returns { success: true, expiresIn: 600 }
+// SignupPage:
+api.post("/auth/signup", { email, password, confirm_password });
+// → returns { success: true, data: { uid: "..." } }
 
-// OTPPage:
-api.post("/auth/otp/verify", { email, otp });
-// → backend validates OTP, sets httpOnly session cookie, returns { user: {...} }
-// On success: queryClient.setQueryData(['session'], { user: responseData.user })
-//             then navigate to /app
+// OTPPage (Verification):
+api.post("/auth/verify-otp", { uid, otp, otp_type: type });
+// → If signup: returns { success: true }. 
+// → If forgotpassword: returns { success: true, data: { reset_token: "..." } }
 
-// Session check:
-api.get("/auth/me");
-// → returns { user: { id, email, name } } if cookie valid, 401 if not
+// LoginPage:
+api.post("/auth/login", { email, password });
+// → Sets cookies, returns { success: true, data: { ...user } }
 
 // Logout:
 api.post("/auth/logout");
-// → server clears cookie, returns 200
+// → server clears cookies, returns 200
 ```
 
 ### No localStorage Rule
@@ -3319,20 +3145,21 @@ xl:  1024–1279px Laptop — full layout
 
 | Page                | Element                              | Action                                      | Destination / Effect                       |
 | ------------------- | ------------------------------------ | ------------------------------------------- | ------------------------------------------ |
-| Landing Navbar      | "Sign In"                            | navigate                                    | `/auth`                                    |
-| Landing Navbar      | "Get Access"                         | navigate                                    | `/auth`                                    |
-| Landing Hero        | "Start Analyzing Markets"            | navigate                                    | `/auth`                                    |
+| Landing Navbar      | "Sign In"                            | navigate                                    | `/auth/login`                              |
+| Landing Navbar      | "Get Access"                         | navigate                                    | `/auth/signup`                             |
+| Landing Hero        | "Start Analyzing Markets"            | navigate                                    | `/auth/signup`                             |
 | Landing Hero        | "See How It Works"                   | smooth scroll                               | `#how-it-works` on same page               |
-| Landing CTA section | "Create Free Account"                | navigate                                    | `/auth`                                    |
+| Landing CTA section | "Create Free Account"                | navigate                                    | `/auth/signup`                             |
 | Landing CTA section | "Read the Methodology"               | smooth scroll                               | `#scoring`                                 |
 | Landing Footer      | "Home"                               | navigate                                    | `/`                                        |
 | Landing Footer      | "Discover"                           | navigate                                    | `/app`                                     |
 | Landing Footer      | "Tracker"                            | navigate                                    | `/app/tracker`                             |
-| EmailPage           | "Send One-Time Code"                 | POST `/auth/otp/send` → navigate            | `/auth/otp?email=...`                      |
-| OTPPage             | "← Change email"                     | navigate                                    | `/auth`                                    |
-| OTPPage             | 6th digit entry                      | auto-trigger verify                         | POST `/auth/otp/verify`                    |
-| OTPPage             | "Verify & Sign In"                   | POST `/auth/otp/verify` → loader → navigate | `/app`                                     |
-| OTPPage             | "Resend" (after countdown)           | POST `/auth/otp/send`                       | resets countdown, shows toast              |
+| SignupPage          | "Get Started" / "Sign Up"            | POST `/auth/signup` → navigate              | `/auth/otp?email=...&uid=...`              |
+| LoginPage           | "Sign In"                            | POST `/auth/login` → navigate               | `/app`                                     |
+| OTPPage             | "← Back"                             | navigate                                    | `/auth/signup`                             |
+| OTPPage             | 6th digit entry                      | auto-trigger verify                         | POST `/auth/verify-otp`                    |
+| OTPPage             | "Verify Account"                     | POST `/auth/verify-otp` → navigate          | `/auth/login`                              |
+| OTPPage             | "Resend" (after countdown)           | POST `/auth/resend-otp`                     | resets countdown, shows toast              |
 | Topbar              | PrismLogo                            | navigate                                    | `/app`                                     |
 | Topbar              | "Discover" nav link                  | navigate                                    | `/app`                                     |
 | Topbar              | "Tracker" nav link                   | navigate                                    | `/app/tracker`                             |
@@ -3366,7 +3193,7 @@ xl:  1024–1279px Laptop — full layout
 
 1. Design tokens (CSS vars + Tailwind config) + fonts
 2. Brand components: PrismLogo → PrismLoader → Button + Spinner
-3. Auth pages: EmailPage → OTPPage (establish cookie flow first)
+3. Auth pages: SignupPage → OTPPage → LoginPage (establish cookie flow)
 4. App layout: Topbar → MobileNav → AppLayout
 5. Shared UI: ScoreBadge, ClassificationChip, DirectionArrow, SourceBadge, MarketCard, TrackerCard
 6. Discovery page (no chart dependencies, tests the market API)
@@ -3398,4 +3225,4 @@ When the 6th box is filled, trigger submission immediately (no button click requ
 
 _End of Prism Frontend Specification — V2.0_
 _Confidential — Prism Hackathon Team_
-_Product structure: Landing → Email → OTP → Discover → Tracker → Market Analysis_
+_Product structure: Landing → Signup → OTP → Login → Discover → Tracker → Market Analysis_
