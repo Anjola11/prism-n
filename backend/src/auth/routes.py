@@ -16,6 +16,7 @@ from src.db.main import get_session
 from src.auth.services import AuthServices
 from src.utils.logger import logger
 from src.utils.dependencies import get_verified_user
+from src.utils.responses import success_response
 
 auth_router = APIRouter()
 
@@ -33,7 +34,10 @@ async def create_user(
     logger.info(f"Signup attempt for email: {user_input.email}")
     result = await auth_services.create_user(user_input, session, background_tasks, response)
     logger.info(f"Signup successful for email: {user_input.email}")
-    return result
+    return success_response(
+        message="Signup successful, an OTP has been sent to your email to verify your account.",
+        data=result,
+    )
 
 @auth_router.post('/verify-otp', status_code=status.HTTP_200_OK)
 async def verify_otp(
@@ -44,7 +48,13 @@ async def verify_otp(
 ):
     logger.info(f"OTP Verification attempt for user ID: {otp_input.uid}")
     result = await auth_services.verify_otp(otp_input, session, background_tasks)
-    return result
+    message = "OTP verified successfully"
+    if otp_input.otp_type == "signup":
+        message = "OTP verified successfully. You can now login."
+    return success_response(
+        message=message,
+        data=result,
+    )
 
 @auth_router.post('/resend-otp', status_code=status.HTTP_200_OK)
 async def resend_otp(
@@ -55,7 +65,15 @@ async def resend_otp(
 ):
     logger.info(f"Resend OTP attempt for email: {resend_otp_input.email}")
     result = await auth_services.resend_otp(resend_otp_input, session, background_tasks)
-    return result
+    message = "OTP resent successfully"
+    if resend_otp_input.otp_type == "signup":
+        message = "Signup OTP resent successfully"
+    elif resend_otp_input.otp_type == "forgotpassword":
+        message = "Password reset OTP resent successfully"
+    return success_response(
+        message=message,
+        data=result,
+    )
 
 @auth_router.post('/forgot-password', status_code=status.HTTP_200_OK)
 async def forgot_password(
@@ -65,8 +83,11 @@ async def forgot_password(
     auth_services: AuthServices = Depends(get_auth_services)
 ):
     logger.info(f"Forgot password attempt for email: {forgot_password_input.email}")
-    result = await auth_services.forgotPassword(forgot_password_input, session, background_tasks)
-    return result
+    result = await auth_services.forgot_password(forgot_password_input, session, background_tasks)
+    return success_response(
+        message="An OTP to reset password has been sent to your email.",
+        data=result,
+    )
 
 @auth_router.post('/reset-password', status_code=status.HTTP_200_OK)
 async def reset_password(
@@ -75,8 +96,11 @@ async def reset_password(
     auth_services: AuthServices = Depends(get_auth_services)
 ):
     logger.info("Reset password attempt")
-    result = await auth_services.resetPassword(reset_password_input, session)
-    return result
+    result = await auth_services.reset_password(reset_password_input, session)
+    return success_response(
+        message="Password reset successfully",
+        data=result,
+    )
 
 @auth_router.post('/login', response_model=UserLoginResponse, status_code=status.HTTP_200_OK)
 async def login(
@@ -88,7 +112,10 @@ async def login(
     logger.info(f"Login attempt for email: {login_input.email}")
     result = await auth_services.login_user(login_input, session, response)
     logger.info(f"Login successful for email: {login_input.email}")
-    return result
+    return success_response(
+        message="Login successful",
+        data=result,
+    )
 
 @auth_router.post('/renew-access-token', response_model=RenewAccessTokenResponse, status_code=status.HTTP_200_OK)
 async def renew_access_token(
@@ -98,9 +125,12 @@ async def renew_access_token(
     refresh_token: str | None = Cookie(default=None)
 ):
     logger.info("Renew access token request received.")
-    result = await auth_services.renewAccessToken(refresh_token, session, response)
+    result = await auth_services.renew_access_token(refresh_token, session, response)
     logger.info("Access token effectively renewed.")
-    return result
+    return success_response(
+        message="Access token renewed",
+        data=result,
+    )
 
 @auth_router.post('/logout', response_model=LogoutResponse, status_code=status.HTTP_200_OK)
 async def logout(
@@ -112,9 +142,16 @@ async def logout(
     logger.info("Logout request received.")
     result = await auth_services.logout(response, access_token, refresh_token)
     logger.info("Logout successful.")
-    return result
+    return success_response(
+        message="Logged out successfully",
+        data=result,
+    )
 
 
 @auth_router.get("/me")
 async def get_me(current_user = Depends(get_verified_user), auth_services: AuthServices = Depends(get_auth_services)):
-    return await auth_services.get_me(current_user)
+    result = await auth_services.get_me(current_user)
+    return success_response(
+        message="User details fetched successfully",
+        data=result,
+    )

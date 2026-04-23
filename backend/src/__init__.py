@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from src.utils.logger import logger
 from src.auth.routes import auth_router
+from src.markets.routes import markets_router
 
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
@@ -12,18 +13,28 @@ from fastapi.exceptions import RequestValidationError
 from src.db.redis import redis_client, check_redis_connection
 from src.utils.logger import logger
 from src.config import Config
+from src.utils.bayse import BayseServices
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 1. Initialize Postgres
+    # Initialize Postgres
     await init_db()
     
-    # 2. Check Redis Connection
+    # Check Redis Connection
     await check_redis_connection()
+
+    app.state.bayse = BayseServices()
+    logger.info("BayseServices started (HTTP Connection Pool ready)")
 
     yield
     
-    # 3. Clean up Redis connections on shutdown
+    if hasattr(app.state, "bayse"):
+        try:
+            await app.state.bayse.close()
+        except Exception as e:
+            logger.error(f"Error closing BayseServices: {e}")
+
+    # Clean up Redis connections on shutdown
     logger.info("Closing Redis Connection")
     if redis_client:
         await redis_client.close()
@@ -54,8 +65,19 @@ app.add_middleware(
 )
 
 @app.get("/")
-def health_check():
+def root_health_check():
     return "server working"
+
+
+@app.get("/healthz")
+def health_check():
+    return {
+        "success": True,
+        "message": "Server healthy",
+        "data": {
+            "status": "ok",
+        },
+    }
 
 
 @app.exception_handler(HTTPException)
@@ -95,3 +117,4 @@ async def custom_validation_exception_handler(request:Request, exc: RequestValid
 
 
 app.include_router(auth_router, prefix="/api/v1/auth", tags=["Authentication"])
+app.include_router(markets_router, prefix="/api/v1", tags=["Markets"])

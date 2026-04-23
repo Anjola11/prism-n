@@ -90,13 +90,9 @@ class AuthServices:
             )
             
             return {
-                "success": True,
-                "message": "Signup successful, an OTP has been sent to your email to verify your account.",
-                "data": {
-                    **user_dict,
-                    'access_token': access_token,
-                    'refresh_token': refresh_token,
-                }
+                "uid": str(new_user.uid),
+                "email": new_user.email,
+                "email_verified": new_user.email_verified,
             }
 
         except Exception as e:
@@ -174,11 +170,7 @@ class AuthServices:
                     user.email
                 )
 
-                return {
-                    "success": True,
-                    "message": "OTP verified successfully. You can now login.",
-                    "data": user
-                }
+                return user.model_dump()
 
             except Exception as e:
                 logger.error(f"Error validating otp user logic: {e}")
@@ -197,12 +189,8 @@ class AuthServices:
                 reset_password_token = create_token(token_data, token_type=TokenType.RESET)
                 
                 return {
-                    "success": True,
-                    "message": "OTP verified successfully",
-                    "data": {
-                        "uid": latest_otp_record.uid,
-                        "reset_token": reset_password_token
-                    }
+                    "uid": str(latest_otp_record.uid),
+                    "reset_token": reset_password_token,
                 }
             except Exception as e:
                 logger.error(f"Error removing forgotpassword otp: {e}")
@@ -257,11 +245,7 @@ class AuthServices:
                 otp_record.otp
             )
             
-            return {
-                "success": True,
-                "message": "Signup OTP resent successfully", 
-                "uid": user.uid
-            }
+            return {"uid": str(user.uid)}
 
         elif resend_otp_input.otp_type == OtpTypes.FORGOTPASSWORD:
              
@@ -284,11 +268,7 @@ class AuthServices:
                 user.email, 
                 otp_record.otp
             )
-            return {
-                "success": True, 
-                "message": "Password reset OTP resent successfully",
-                "uid": user.uid
-            }
+            return {"uid": str(user.uid)}
         
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -337,19 +317,13 @@ class AuthServices:
         )
 
         return {
-            "success": True,
-            "message": "Login successful",
-            "data": {
-                'uid': str(user.uid),
-                'email': user.email,
-                'email_verified': user.email_verified,
-                'access_token': access_token,
-                'refresh_token': refresh_token,
-            }
+            'uid': str(user.uid),
+            'email': user.email,
+            'email_verified': user.email_verified,
         }
 
-    async def forgotPassword(self, forgotPasswordInput: ForgotPasswordInput, session: AsyncSession, background_tasks: BackgroundTasks):
-        user = await self.get_user(forgotPasswordInput.email, session, True)
+    async def forgot_password(self, forgot_password_input: ForgotPasswordInput, session: AsyncSession, background_tasks: BackgroundTasks):
+        user = await self.get_user(forgot_password_input.email, session, True)
 
         if not user:
             raise HTTPException(
@@ -365,16 +339,10 @@ class AuthServices:
             otp_record.otp
         )
 
-        return {
-            "success": True,
-            "message": "An OTP to reset password has been sent to your email.",
-            "data": {
-                "uid": str(user.uid)
-            }
-        }
+        return {"uid": str(user.uid)}
     
-    async def resetPassword(self, resetPasswordInput: ResetPasswordInput, session: AsyncSession):
-        token_decode = decode_token(resetPasswordInput.reset_token)
+    async def reset_password(self, reset_password_input: ResetPasswordInput, session: AsyncSession):
+        token_decode = decode_token(reset_password_input.reset_token)
 
         if token_decode.get('type') != "reset":
             raise HTTPException(
@@ -394,7 +362,7 @@ class AuthServices:
                 detail="User not found"
             )
 
-        new_hashed_password = generate_password_hash(resetPasswordInput.new_password.strip())
+        new_hashed_password = generate_password_hash(reset_password_input.new_password.strip())
         user.password_hash = new_hashed_password
         user.email_verified = True  # Successful reset via OTP proves email ownership
 
@@ -402,10 +370,7 @@ class AuthServices:
             session.add(user)
             await session.commit()
             await session.refresh(user)
-            return {
-                "success": True,
-                "message": "Password reset successfully"
-            }
+            return {}
         except Exception:
             await session.rollback()
             raise HTTPException(
@@ -413,7 +378,7 @@ class AuthServices:
                 detail="Internal server error"
             )
         
-    async def renewAccessToken(self, old_refresh_token_str: str,  session: AsyncSession, response: Response):
+    async def renew_access_token(self, old_refresh_token_str: str, session: AsyncSession, response: Response):
         old_refresh_token_decode = decode_token(old_refresh_token_str)
 
         if old_refresh_token_decode.get('type') != "refresh":
@@ -460,14 +425,7 @@ class AuthServices:
             max_age=int(refresh_token_expiry.total_seconds())
         )
 
-        return {
-            "success": True,
-            "message": "Access token renewed",
-            "data": {
-                "access_token": new_token,
-                "refresh_token": new_refresh_token
-            }
-        }
+        return {}
     
     async def add_token_to_blocklist(self, token):
         token_decoded = decode_token(token)
@@ -504,20 +462,22 @@ class AuthServices:
         if refresh_token:
             await self.add_token_to_blocklist(refresh_token)
 
-        response.delete_cookie(key="access_token", httponly=True, samesite="none", secure=True)
-        response.delete_cookie(key="refresh_token", httponly=True, samesite="none", secure=True)
+        response.delete_cookie(
+            key="access_token",
+            httponly=cookie_settings["httponly"],
+            samesite=cookie_settings["samesite"],
+            secure=cookie_settings["secure"],
+        )
+        response.delete_cookie(
+            key="refresh_token",
+            httponly=cookie_settings["httponly"],
+            samesite=cookie_settings["samesite"],
+            secure=cookie_settings["secure"],
+        )
         
-        return {
-            "success": True,
-            "message": "Logged out successfully",
-            "data": {}
-        }
+        return {}
 
     async def get_me(self, current_user):
         user_dict = current_user.model_dump()
 
-        return {
-            "success": True,
-            "message": "User details fetched successfully",
-            "data": user_dict
-        }
+        return user_dict

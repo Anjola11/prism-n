@@ -16,6 +16,7 @@ async def init_db():
 
         #import models here
         from src.auth.models import User, SignupOtp, ForgotPasswordOtp
+        from src.markets.models import MarketBaseline, TrackedEventMetric, TrackedMarket, UserTrackedEvent
         
         await conn.run_sync(SQLModel.metadata.create_all)
 

@@ -84,3 +84,9 @@ async def get_verified_user(
         )
         
     return current_user
+
+
+async def get_verified_user_id(
+    current_user = Depends(get_verified_user)
+):
+    return current_user.uid

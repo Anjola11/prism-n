@@ -1,5 +1,5 @@
 .env
-bayse.py
+
 
 __pycache__
 
@@ -118,3 +118,11 @@ Thumbs.db
 # Misc
 *.log
 *.tmp
+
+# Generated planning docs
+backend/PRISM_BACKEND_BUILD_BRIEF.md
+backend/PRISM_BACKEND_STEP_BY_STEP_GUIDE.md
+backend/PHASE_3_TO_5_BACKEND_EXPLAINER.md
+
+
+outputs/
