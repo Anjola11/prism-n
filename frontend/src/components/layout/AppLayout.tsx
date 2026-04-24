@@ -3,32 +3,51 @@ import { Outlet, useNavigate, useRouterState } from '@tanstack/react-router';
 import { PrismLogo } from '../brand/PrismLogo';
 import { Search, Bookmark, LogOut } from 'lucide-react';
 import { authApi } from '../../lib/api/auth';
+import type { AuthUserApi } from '../../lib/api/types';
 
 export function AppLayout() {
   const navigate = useNavigate();
   const routerState = useRouterState();
   const [isAuthLoading, setIsAuthLoading] = useState(true);
+  const [currentUser, setCurrentUser] = useState<AuthUserApi | null>(null);
 
   useEffect(() => {
+    let isMounted = true;
+
     async function checkAuth() {
       try {
-        await authApi.getMe();
+        const user = await authApi.getMe();
+        if (isMounted) {
+          setCurrentUser(user);
+        }
       } catch (err: any) {
         if (err.response?.status === 401) {
            try {
              await authApi.renewAccessToken();
-             await authApi.getMe();
+             const user = await authApi.getMe();
+             if (isMounted) {
+               setCurrentUser(user);
+             }
            } catch (renewErr) {
-             navigate({ to: '/auth/login' });
+             if (isMounted) {
+               navigate({ to: '/auth/login' });
+             }
            }
         } else {
-           navigate({ to: '/auth/login' });
+           if (isMounted) {
+             navigate({ to: '/auth/login' });
+           }
         }
       } finally {
-        setIsAuthLoading(false);
+        if (isMounted) {
+          setIsAuthLoading(false);
+        }
       }
     }
     checkAuth();
+    return () => {
+      isMounted = false;
+    };
   }, [navigate]);
 
   const handleLogout = async () => {
@@ -69,6 +88,10 @@ export function AppLayout() {
 
         {/* Right Section */}
         <div className="flex items-center gap-4">
+          <div className="hidden sm:flex flex-col items-end">
+            <span className="font-mono text-[10px] uppercase tracking-wider text-text-muted">Signed In</span>
+            <span className="text-xs text-text-secondary">{currentUser?.email || 'Session active'}</span>
+          </div>
           <div className="w-8 h-8 rounded-full bg-prism-blue/20 border border-prism-blue/40 flex items-center justify-center cursor-pointer hover:bg-prism-blue/30 transition-colors" onClick={handleLogout} title="Logout">
             <LogOut size={14} className="text-prism-cyan" />
           </div>

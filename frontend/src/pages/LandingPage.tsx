@@ -86,7 +86,7 @@ export function LandingPage() {
 
         <div className="hero-animate flex flex-col sm:flex-row gap-3 mt-8">
           <Button variant="primary" size="lg" onClick={() => navigate({ to: '/auth/signup' })}>Start Analyzing Markets</Button>
-          <Button variant="outline" size="lg" onClick={() => navigate({ to: '/app' })}>Demo Access</Button>
+          <Button variant="outline" size="lg" onClick={() => navigate({ to: '/auth/login' })}>Sign In</Button>
         </div>
 
         <p className="hero-animate font-mono text-xs text-text-muted tracking-wide mt-5">

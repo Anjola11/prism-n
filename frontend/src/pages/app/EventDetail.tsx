@@ -1,230 +1,285 @@
-import React, { useState, useLayoutEffect, useRef, useEffect } from 'react';
-import { useParams, useNavigate } from '@tanstack/react-router';
-import { marketsApi } from '../../lib/api/markets';
-import { ShieldAlert, TrendingUp, TrendingDown, Activity, Sparkles, AlertTriangle, Users, Droplets, Zap, CheckCircle, ArrowLeft } from 'lucide-react';
+import React, { useLayoutEffect, useRef, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { useNavigate, useParams, useSearch } from '@tanstack/react-router';
+import { Activity, ArrowLeft, Droplets, Sparkles, TrendingDown, TrendingUp, Users, Zap } from 'lucide-react';
 import gsap from 'gsap';
+
+import { marketsApi } from '../../lib/api/markets';
+import type { EventDetailApi } from '../../lib/api/types';
+import { formatCurrencyCompact, formatRelative } from '../../lib/format';
 
 export function EventDetail() {
   const { eventId } = useParams({ strict: false }) as { eventId: string };
+  const search = useSearch({ from: '/app/events/$eventId' }) as { source?: string };
   const navigate = useNavigate();
   const container = useRef<HTMLDivElement>(null);
-  
-  const [event, setEvent] = useState<any>(null);
-  const [activeTabId, setActiveTabId] = useState<string>("");
-  const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    async function fetchEvent() {
-      try {
-        const data = await marketsApi.getEvent(eventId);
-        setEvent(data);
-        if (data && data.highest_scoring_market) {
-          setActiveTabId(data.highest_scoring_market.market_id);
-        } else if (data && data.markets && data.markets.length > 0) {
-          setActiveTabId(data.markets[0].market_id);
-        }
-      } catch (err) {
-        console.error("Failed to fetch event detail", err);
-      } finally {
-        setLoading(false);
-      }
-    }
-    if (eventId) {
-      fetchEvent();
-    }
-  }, [eventId]);
+  const [activeTabId, setActiveTabId] = useState('');
+  const eventQuery = useQuery({
+    queryKey: ['event-detail', eventId, search.source],
+    queryFn: async () => marketsApi.getEvent(eventId, undefined, search.source),
+    enabled: !!eventId,
+    staleTime: 15_000,
+    gcTime: 5 * 60_000,
+    refetchInterval: 30_000,
+    placeholderData: (previousData) => previousData,
+  });
 
-  const selectedOutcome = event?.markets?.find((o: any) => o.market_id === activeTabId) || event?.markets?.[0];
+  const event: EventDetailApi | null = eventQuery.data || null;
+
+  React.useEffect(() => {
+    if (!event) return;
+    if (event.highest_scoring_market) {
+      setActiveTabId(event.highest_scoring_market.market_id);
+      return;
+    }
+    if (event.markets.length > 0) {
+      setActiveTabId(event.markets[0].market_id);
+    }
+  }, [event]);
+
+  const selectedOutcome = event?.markets.find((market) => market.market_id === activeTabId) || event?.markets[0];
 
   useLayoutEffect(() => {
     if (!event || !selectedOutcome) return;
+
     const ctx = gsap.context(() => {
-      // Animate dynamic panel content when tab changes
-      gsap.fromTo('.dynamic-panel', 
+      gsap.fromTo(
+        '.dynamic-panel',
         { opacity: 0, y: 10 },
-        { opacity: 1, y: 0, duration: 0.4, ease: 'power2.out' }
+        { opacity: 1, y: 0, duration: 0.4, ease: 'power2.out' },
       );
     }, container);
+
     return () => ctx.revert();
   }, [activeTabId, event, selectedOutcome]);
 
-  if (loading) return <div className="text-white p-10 text-center">Loading event...</div>;
-  if (!event) return <div className="text-white p-10 text-center">Event not found</div>;
+  if (eventQuery.isLoading) {
+    return (
+      <div className="mx-auto flex max-w-4xl flex-col gap-6 px-6 py-8">
+        <div className="h-8 w-64 animate-pulse rounded bg-card" />
+        <div className="h-40 animate-pulse rounded-2xl border border-border bg-card" />
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+          <div className="h-40 animate-pulse rounded-xl border border-border bg-card" />
+          <div className="md:col-span-2 h-40 animate-pulse rounded-xl border border-border bg-card" />
+        </div>
+      </div>
+    );
+  }
+  if (eventQuery.isError) return <div className="p-10 text-center text-amber-500">Failed to fetch event detail.</div>;
+  if (!event || !selectedOutcome) return <div className="p-10 text-center text-white">Event not found</div>;
 
   const getScoreColor = (score: number) => {
     if (score >= 70) return 'text-emerald-400 bg-emerald-400/10 border-emerald-400/20';
-    if (score >= 40) return 'text-slate-400 bg-slate-400/10 border-slate-400/20';
+    if (score >= 40) return 'text-slate-300 bg-slate-400/10 border-slate-400/20';
     return 'text-amber-500 bg-amber-500/10 border-amber-500/20';
   };
 
-  const getRiskColor = (risk: string) => {
-    if (risk === 'HIGH') return 'text-amber-500 border-amber-500/20 bg-amber-500/5';
-    if (risk === 'MEDIUM') return 'text-slate-400 border-slate-400/20 bg-slate-400/5';
-    return 'text-emerald-400 border-emerald-400/20 bg-emerald-400/5';
-  };
-
-  // Mocked quant data for now since backend doesn't provide it yet
-  const getQuantData = (outcome: any) => ({
-    trap_risk: outcome.signal?.score < 30 ? 'HIGH' : 'LOW',
-    trap_reason: 'Analysis based on live liquidity patterns',
-    momentum_verdict: outcome.signal?.direction === 'RISING' ? 'Likely to Continue' : 'Likely to Reverse',
-    momentum_confidence: outcome.signal?.score || 50
-  });
-
-  const quantData = selectedOutcome ? getQuantData(selectedOutcome) : null;
+  const factorEntries = selectedOutcome.signal?.factors
+    ? Object.entries(selectedOutcome.signal.factors).filter(([, value]) => typeof value === 'number')
+    : [];
 
   return (
-    <div ref={container} className="max-w-4xl mx-auto px-6 py-8 flex flex-col gap-6">
-      
-      {/* Breadcrumbs & Back */}
+    <div ref={container} className="mx-auto flex max-w-4xl flex-col gap-6 px-6 py-8">
       <div className="flex items-center gap-2">
-        <button onClick={() => navigate({ to: '/app' })} className="flex items-center gap-1 font-mono text-xs text-text-muted hover:text-text-secondary transition-colors">
+        <button
+          onClick={() => navigate({ to: '/app' })}
+          className="flex items-center gap-1 font-mono text-xs text-text-muted transition-colors hover:text-text-secondary"
+        >
           <ArrowLeft size={14} /> Back
         </button>
         <span className="text-text-dim">/</span>
-        <span className="font-mono text-xs text-text-muted hidden sm:inline-block truncate max-w-[300px]">
-          Tracker → {event.event_title}
+        <span className="hidden max-w-[300px] truncate font-mono text-xs text-text-muted sm:inline-block">
+          Tracker / {event.event_title}
         </span>
       </div>
 
-      {/* Section A: The Header */}
       <div>
-        <h1 className="font-heading text-2xl sm:text-3xl text-text-primary font-bold leading-tight mt-2 mb-4">
+        <h1 className="mt-2 mb-4 font-heading text-2xl font-bold leading-tight text-text-primary sm:text-3xl">
           {event.event_title}
         </h1>
-        
+
         <div className="flex flex-wrap items-center gap-4">
-          <span className="font-mono text-[10px] uppercase bg-navy border border-border/60 px-2 py-1 rounded text-text-secondary tracking-widest shadow-sm">
-            {event.source}
+          <span className="rounded border border-border/60 bg-navy px-2 py-1 font-mono text-[10px] uppercase tracking-widest text-text-secondary shadow-sm">
+            {event.source} / {event.currency}
           </span>
           {event.highest_scoring_market?.signal && (
-             <span className={`font-mono text-xs font-bold px-3 py-1 rounded border shadow-sm ${getScoreColor(event.highest_scoring_market.signal.score)}`}>
-               HEAT SCORE {event.highest_scoring_market.signal.score}
-             </span>
+            <span className={`rounded border px-3 py-1 font-mono text-xs font-bold shadow-sm ${getScoreColor(event.highest_scoring_market.signal.score)}`}>
+              HEAT SCORE {event.highest_scoring_market.signal.score}
+            </span>
           )}
           <span className="font-mono text-xs text-text-muted">
-            Total Pool: ${(event.total_liquidity / 1000000).toFixed(1)}M
+            Total Pool: {formatCurrencyCompact(event.currency, event.total_liquidity)}
           </span>
-          <span className="font-mono text-xs text-text-muted ml-auto">
-            Updated {event.last_updated}
+          <span className="ml-auto font-mono text-xs text-text-muted">
+            Updated {formatRelative(event.last_updated)}
           </span>
         </div>
       </div>
 
-      {/* Section B: The AI Insight */}
-      <div className="mt-2 bg-navy-mid border border-prism-blue/25 rounded-2xl p-6 relative overflow-hidden">
-        <div className="absolute left-0 top-0 bottom-0 w-[3px] bg-gradient-to-b from-prism-violet to-prism-cyan" />
-        <div className="flex justify-between items-center mb-3">
-          <h2 className="font-mono text-xs text-prism-cyan flex items-center gap-2 uppercase tracking-wide">
+      <div className="relative mt-2 overflow-hidden rounded-2xl border border-prism-blue/25 bg-navy-mid p-6">
+        <div className="absolute top-0 bottom-0 left-0 w-[3px] bg-gradient-to-b from-prism-violet to-prism-cyan" />
+        <div className="mb-3 flex items-center justify-between">
+          <h2 className="flex items-center gap-2 font-mono text-xs uppercase tracking-wide text-prism-cyan">
             <Sparkles size={14} /> AI Interpretation
           </h2>
-          <span className="font-mono text-[10px] text-text-dim">Powered by Google Gemini</span>
+          <span className="font-mono text-[10px] text-text-dim">Placeholder until AI layer is live</span>
         </div>
-        <blockquote className="pl-4 border-l-2 border-prism-blue/40 font-body italic text-text-primary text-[0.9375rem] leading-[1.75]">
-          {event.ai_insight}
+        <blockquote className="border-l-2 border-prism-blue/40 pl-4 font-body text-[0.9375rem] italic leading-[1.75] text-text-primary">
+          {event.ai_insight || 'Insight unavailable'}
         </blockquote>
       </div>
 
-      {/* Section C: The Universal Tab Bar */}
       <div className="mt-4 border-b border-border/50">
-        <div className="flex overflow-x-auto hide-scrollbar gap-2 pb-[-1px]">
-          {event.markets?.map((outcome: any) => (
+        <div className="hide-scrollbar flex gap-2 overflow-x-auto">
+          {event.markets.map((outcome) => (
             <button
               key={outcome.market_id}
               onClick={() => setActiveTabId(outcome.market_id)}
-              className={`whitespace-nowrap px-4 py-3 font-mono text-sm transition-all border-b-2 flex flex-col items-center gap-1 min-w-[120px] ${
+              className={`flex min-w-[120px] flex-col items-center gap-1 whitespace-nowrap rounded-t-lg border-b-2 px-4 py-3 font-mono text-sm transition-all ${
                 activeTabId === outcome.market_id
-                  ? 'border-prism-blue text-text-primary bg-navy-mid/50 rounded-t-lg'
-                  : 'border-transparent text-text-muted hover:text-text-secondary hover:bg-navy-mid/30 rounded-t-lg'
+                  ? 'border-prism-blue bg-navy-mid/50 text-text-primary'
+                  : 'border-transparent text-text-muted hover:bg-navy-mid/30 hover:text-text-secondary'
               }`}
             >
               <span>{outcome.market_title}</span>
-              {outcome.signal && (
-                <span className={`text-[10px] px-1.5 rounded-full ${getScoreColor(outcome.signal.score)}`}>
-                  Score {outcome.signal.score}
-                </span>
-              )}
+              <span className={`rounded-full px-1.5 text-[10px] ${getScoreColor(outcome.signal.score)}`}>
+                Score {outcome.signal.score}
+              </span>
             </button>
           ))}
         </div>
       </div>
 
-      {/* Section D: The Outcome Details (Dynamic Panel) */}
-      {selectedOutcome && quantData && (
-      <div className="dynamic-panel flex flex-col gap-6 w-full mt-4">
-        
-        {/* Core Outcome Metrics */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <div className="md:col-span-1 bg-card border border-border rounded-xl p-6 flex flex-col items-center justify-center text-center">
-            <span className="font-mono text-xs text-text-muted uppercase mb-4 tracking-wider">Current Probability</span>
+      <div className="dynamic-panel mt-4 flex w-full flex-col gap-6">
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+          <div className="flex flex-col items-center justify-center rounded-xl border border-border bg-card p-6 text-center">
+            <span className="mb-4 font-mono text-xs uppercase tracking-wider text-text-muted">Current Probability</span>
             <div className="flex items-baseline gap-2">
-              <span className="font-mono text-4xl font-bold text-text-primary flex items-baseline">
-                {Math.round(selectedOutcome.current_probability * 100)}<span className="text-2xl">%</span>
+              <span className="flex items-baseline font-mono text-4xl font-bold text-text-primary">
+                {Math.round((selectedOutcome.current_probability || 0) * 100)}<span className="text-2xl">%</span>
               </span>
             </div>
-            <div className={`mt-2 font-mono text-xs ${selectedOutcome.probability_delta > 0 ? 'text-emerald-400' : 'text-amber-500'}`}>
-              ({selectedOutcome.probability_delta > 0 ? '+' : ''}{selectedOutcome.probability_delta}% move)
+            <div
+              className={`mt-2 font-mono text-xs ${
+                selectedOutcome.probability_delta > 0
+                  ? 'text-emerald-400'
+                  : selectedOutcome.probability_delta < 0
+                    ? 'text-amber-500'
+                    : 'text-slate-400'
+              }`}
+            >
+              ({selectedOutcome.probability_delta > 0 ? '+' : ''}
+              {(selectedOutcome.probability_delta * 100).toFixed(2)} pts move)
             </div>
           </div>
 
-          <div className="md:col-span-2 bg-card border border-border rounded-xl p-6 flex flex-col justify-center">
-            <div className="flex items-center gap-2 mb-6">
+          <div className="md:col-span-2 flex flex-col justify-center rounded-xl border border-border bg-card p-6">
+            <div className="mb-6 flex items-center gap-2">
               <Activity size={16} className="text-prism-blue" />
-              <h3 className="font-mono text-xs text-text-muted uppercase tracking-wide">Live Microstructure</h3>
+              <h3 className="font-mono text-xs uppercase tracking-wide text-text-muted">Live Microstructure</h3>
             </div>
             <div className="grid grid-cols-3 gap-4 divide-x divide-border">
               <div className="flex flex-col items-center justify-center px-2">
-                <span className="font-mono text-xl font-bold text-text-primary mb-1">${(selectedOutcome.event_liquidity / 1000).toFixed(0)}k</span>
-                <span className="font-mono text-[10px] text-text-muted flex items-center gap-1 uppercase"><Droplets size={10}/> Liquidity</span>
+                <span className="mb-1 font-mono text-xl font-bold text-text-primary">
+                  {formatCurrencyCompact(event.currency, selectedOutcome.event_liquidity)}
+                </span>
+                <span className="flex items-center gap-1 font-mono text-[10px] uppercase text-text-muted">
+                  <Droplets size={10} /> Liquidity
+                </span>
               </div>
               <div className="flex flex-col items-center justify-center px-2">
-                <span className="font-mono text-xl font-bold text-text-primary mb-1">{selectedOutcome.market_total_orders?.toLocaleString() || 0}</span>
-                <span className="font-mono text-[10px] text-text-muted flex items-center gap-1 uppercase"><Users size={10}/> Orders</span>
+                <span className="mb-1 font-mono text-xl font-bold text-text-primary">
+                  {selectedOutcome.market_total_orders?.toLocaleString() || 0}
+                </span>
+                <span className="flex items-center gap-1 font-mono text-[10px] uppercase text-text-muted">
+                  <Users size={10} /> Orders
+                </span>
               </div>
               <div className="flex flex-col items-center justify-center px-2">
-                <span className="font-mono text-xl font-bold text-text-primary mb-1">-- x</span>
-                <span className="font-mono text-[10px] text-text-muted flex items-center gap-1 uppercase"><Zap size={10}/> Vol Spk</span>
+                <span className="mb-1 font-mono text-xl font-bold text-text-primary">{selectedOutcome.signal.score}</span>
+                <span className="flex items-center gap-1 font-mono text-[10px] uppercase text-text-muted">
+                  <Zap size={10} /> Signal
+                </span>
               </div>
             </div>
           </div>
         </div>
 
-        {/* Quant Boxes */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          
-          <div className={`border rounded-xl p-6 relative overflow-hidden ${getRiskColor(quantData.trap_risk)}`}>
-            <div className="flex items-center gap-2 mb-4">
-              <AlertTriangle size={16} />
-              <h3 className="font-mono text-xs uppercase tracking-wide font-bold">Trap Risk: {quantData.trap_risk}</h3>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div className="rounded-xl border border-border bg-navy-mid p-6">
+            <div className="mb-4 flex items-center gap-2">
+              {selectedOutcome.signal.direction === 'RISING' ? (
+                <TrendingUp size={16} className="text-emerald-400" />
+              ) : (
+                <TrendingDown size={16} className="text-amber-500" />
+              )}
+              <h3 className="font-mono text-xs uppercase tracking-wide text-text-muted">Momentum Assessment</h3>
             </div>
-            <p className="font-body text-sm leading-relaxed opacity-90">
-              {quantData.trap_reason}
-            </p>
-          </div>
-
-          <div className="bg-navy-mid border border-border rounded-xl p-6">
-            <div className="flex items-center gap-2 mb-4">
-              {quantData.momentum_verdict === 'Likely to Continue' ? <TrendingUp size={16} className="text-emerald-400" /> : <TrendingDown size={16} className="text-amber-500" />}
-              <h3 className="font-mono text-xs text-text-muted uppercase tracking-wide">Momentum Assessment</h3>
+            <div className="mb-3 font-mono text-lg font-bold text-text-primary">
+              {selectedOutcome.signal.direction}
             </div>
-            <div className="font-mono font-bold text-lg text-text-primary mb-3">
-              {quantData.momentum_verdict}
-            </div>
-            <div className="w-full bg-navy rounded-full h-1.5 overflow-hidden">
-               <div 
-                 className={`h-full ${quantData.momentum_verdict === 'Likely to Continue' ? 'bg-emerald-400' : 'bg-amber-500'}`} 
-                 style={{ width: `${quantData.momentum_confidence}%` }}
-               />
+            <div className="h-1.5 w-full overflow-hidden rounded-full bg-navy">
+              <div
+                className={`h-full ${
+                  selectedOutcome.signal.direction === 'RISING'
+                    ? 'bg-emerald-400'
+                    : selectedOutcome.signal.direction === 'FALLING'
+                      ? 'bg-amber-500'
+                      : 'bg-slate-400'
+                }`}
+                style={{ width: `${Math.max(8, selectedOutcome.signal.score)}%` }}
+              />
             </div>
             <div className="mt-2 text-right font-mono text-[10px] text-text-muted">
-              {quantData.momentum_confidence}% Confidence
+              {selectedOutcome.signal.classification.replace(/_/g, ' ')}
             </div>
           </div>
 
+          <div className="rounded-xl border border-border bg-navy-mid p-6">
+            <div className="mb-4 flex items-center gap-2">
+              <Activity size={16} className="text-prism-blue" />
+              <h3 className="font-mono text-xs uppercase tracking-wide text-text-muted">Signal Notes</h3>
+            </div>
+            {selectedOutcome.signal.notes && selectedOutcome.signal.notes.length > 0 ? (
+              <div className="flex flex-col gap-2">
+                {selectedOutcome.signal.notes.map((note, index) => (
+                  <p key={index} className="font-body text-sm leading-relaxed text-text-secondary">
+                    {note}
+                  </p>
+                ))}
+              </div>
+            ) : (
+              <p className="font-body text-sm leading-relaxed text-text-secondary">
+                No additional signal notes yet. This market is still using the current live state and scoring snapshot.
+              </p>
+            )}
+          </div>
         </div>
 
+        <div className="rounded-xl border border-border bg-card p-6">
+          <div className="mb-4 flex items-center gap-2">
+            <Activity size={16} className="text-prism-blue" />
+            <h3 className="font-mono text-xs uppercase tracking-wide text-text-muted">Factor Breakdown</h3>
+          </div>
+          {factorEntries.length > 0 ? (
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              {factorEntries.map(([label, value]) => (
+                <div key={label} className="rounded-lg border border-border/60 bg-navy p-4">
+                  <div className="font-mono text-[10px] uppercase tracking-wider text-text-muted">{label}</div>
+                  <div className="mt-2 font-mono text-2xl text-text-primary">
+                    {Math.round(((value as number) || 0) * 100)}%
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="font-body text-sm text-text-secondary">
+              Factor details are not available yet for this market snapshot.
+            </p>
+          )}
+        </div>
       </div>
-      )}
     </div>
   );
 }

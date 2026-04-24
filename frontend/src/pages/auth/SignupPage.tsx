@@ -27,9 +27,8 @@ export function SignupPage() {
     setError('');
 
     try {
-      await authApi.register(formData.email, formData.password);
-      // Navigate to OTP, passing email context via search params (v1 Tanstack routing syntax)
-      navigate({ to: '/auth/otp', search: { email: formData.email } });
+      const user = await authApi.register(formData.email, formData.password, formData.confirm);
+      navigate({ to: '/auth/otp', search: { email: formData.email, uid: user.uid } });
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Failed to create account. Please try again.');
     } finally {

@@ -6,9 +6,16 @@ import { SignupPage } from './pages/auth/SignupPage';
 import { LoginPage } from './pages/auth/LoginPage';
 import { OTPPage } from './pages/auth/OTPPage';
 import { AppLayout } from './components/layout/AppLayout';
+import { AdminLayout } from './components/layout/AdminLayout';
 import { DiscoveryPage } from './pages/app/DiscoveryPage';
 import { TrackerPage } from './pages/app/TrackerPage';
 import { EventDetail } from './pages/app/EventDetail';
+import { AdminLoginPage } from './pages/admin/AdminLoginPage';
+import { AdminOverviewPage } from './pages/admin/AdminOverviewPage';
+import { AdminDiscoveryPage } from './pages/admin/AdminDiscoveryPage';
+import { AdminSystemTrackerPage } from './pages/admin/AdminSystemTrackerPage';
+
+const adminBasePath = import.meta.env.VITE_ADMIN_ROUTE_PREFIX || '/control-room';
 
 export const rootRoute = createRootRoute({
   component: () => <Outlet />,
@@ -45,6 +52,7 @@ export const otpRoute = createRoute({
   validateSearch: (search: Record<string, unknown>) => {
     return {
       email: (search.email as string) || '',
+      uid: (search.uid as string) || '',
     };
   },
 });
@@ -53,6 +61,18 @@ export const appRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/app',
   component: AppLayout,
+});
+
+export const adminLoginRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: `${adminBasePath}/login`,
+  component: AdminLoginPage,
+});
+
+export const adminRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: adminBasePath,
+  component: AdminLayout,
 });
 
 export const discoverRoute = createRoute({
@@ -71,9 +91,35 @@ export const analysisRoute = createRoute({
   getParentRoute: () => appRoute,
   path: '/events/$eventId',
   component: EventDetail,
+  validateSearch: (search: Record<string, unknown>) => ({
+    source: (search.source as string) || 'bayse',
+  }),
 });
 
 const appRouteWithChildren = appRoute.addChildren([discoverRoute, trackerRoute, analysisRoute]);
+const adminIndexRoute = createRoute({
+  getParentRoute: () => adminRoute,
+  path: '/',
+  component: AdminOverviewPage,
+});
+
+const adminDiscoveryRoute = createRoute({
+  getParentRoute: () => adminRoute,
+  path: '/discovery',
+  component: AdminDiscoveryPage,
+});
+
+const adminSystemTrackerRoute = createRoute({
+  getParentRoute: () => adminRoute,
+  path: '/system-tracker',
+  component: AdminSystemTrackerPage,
+});
+
+const adminRouteWithChildren = adminRoute.addChildren([
+  adminIndexRoute,
+  adminDiscoveryRoute,
+  adminSystemTrackerRoute,
+]);
 
 const routeTree = rootRoute.addChildren([
   landingRoute,
@@ -82,6 +128,8 @@ const routeTree = rootRoute.addChildren([
   loginRoute,
   otpRoute,
   appRouteWithChildren,
+  adminLoginRoute,
+  adminRouteWithChildren,
 ]);
 
 export const router = createRouter({ routeTree });

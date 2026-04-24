@@ -46,10 +46,20 @@ Your frontend API layer should understand all three shapes.
 
 Do not hardcode URLs directly inside page components. Use environment variables.
 
-For local development, the backend base should be:
+For local development, the frontend should ideally use a same-origin dev proxy instead of calling the backend host directly from the browser.
+
+That means:
 
 ```text
-http://127.0.0.1:8000/api/v1
+frontend runs on http://127.0.0.1:5173
+browser calls /api/v1/...
+Vite proxies /api to http://127.0.0.1:8000
+```
+
+The actual FastAPI backend still runs on:
+
+```text
+http://127.0.0.1:8000
 ```
 
 For the deployed backend, the current base is:
@@ -66,18 +76,27 @@ In a Vite app, the recommended environment variable is:
 VITE_API_BASE_URL
 ```
 
+For the frontend-only admin route prefix, also use:
+
+```text
+VITE_ADMIN_ROUTE_PREFIX
+```
+
 A professional setup would look like this.
 
 `.env.local`
 
 ```env
-VITE_API_BASE_URL=http://127.0.0.1:8000/api/v1
+# optional; if omitted, local frontend falls back to the dev proxy path
+# VITE_API_BASE_URL=/api/v1
+VITE_ADMIN_ROUTE_PREFIX=/control-room
 ```
 
 `.env.production`
 
 ```env
 VITE_API_BASE_URL=https://prism-60b21aab4083.herokuapp.com/api/v1
+VITE_ADMIN_ROUTE_PREFIX=/control-room
 ```
 
 Then create one API client file, for example:
@@ -86,14 +105,170 @@ Then create one API client file, for example:
 // frontend/src/lib/api/client.ts
 import axios from 'axios'
 
+const LOCAL_API_BASE_URL = '/api/v1'
+const LIVE_API_BASE_URL = 'https://prism-60b21aab4083.herokuapp.com/api/v1'
+
+function isLocalFrontendHost(hostname: string) {
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1'
+}
+
+function resolveApiBaseUrl() {
+  const envBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim()
+  if (envBaseUrl) {
+    return envBaseUrl
+  }
+
+  if (typeof window !== 'undefined' && isLocalFrontendHost(window.location.hostname)) {
+    return LOCAL_API_BASE_URL
+  }
+
+  return LIVE_API_BASE_URL
+}
+
 export const api = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL,
+  baseURL: resolveApiBaseUrl(),
   withCredentials: true,
+  timeout: 15000,
   headers: {
     'Content-Type': 'application/json',
   },
 })
 ```
+
+This is the professional fallback order:
+
+1. `VITE_API_BASE_URL` wins when explicitly set
+2. if no env is set and the frontend is running on `localhost` or `127.0.0.1`, the client talks to the local FastAPI backend
+3. otherwise it falls back to the deployed backend
+
+That gives you local-first testing without having to keep editing source files every time you switch between local development and deployment.
+
+For local work, the most reliable setup is the proxy path because it avoids cross-site cookie problems completely.
+
+One important local cookie note: if your backend runs on `http://127.0.0.1:8000`, the frontend should also be opened on `127.0.0.1`, not `localhost`. Browsers can treat `localhost` and `127.0.0.1` as different sites for cookie purposes. The current Vite config should therefore run the frontend on:
+
+```text
+http://127.0.0.1:5173
+```
+
+That keeps local cookie behavior aligned with the backend host.
+
+The Vite dev server should also proxy API traffic:
+
+```ts
+// vite.config.ts
+server: {
+  host: '127.0.0.1',
+  port: 5173,
+  proxy: {
+    '/api': {
+      target: 'http://127.0.0.1:8000',
+      changeOrigin: false,
+      secure: false,
+    },
+  },
+}
+```
+
+## Source-Aware Markets
+
+The market APIs are now source-aware. Frontend should treat `source` as a first-class request parameter, not just a local UI filter.
+
+Allowed values:
+
+```text
+bayse
+polymarket
+```
+
+If `source` is omitted on discovery, the backend returns the mixed discovery feed.
+
+Examples:
+
+```text
+GET /api/v1/events?currency=NGN
+GET /api/v1/events?currency=NGN&source=bayse
+GET /api/v1/events?currency=NGN&source=polymarket
+```
+
+Detail and tracking routes are also source-aware:
+
+```text
+GET    /api/v1/events/{event_id}?source=bayse
+GET    /api/v1/events/{event_id}?source=polymarket
+POST   /api/v1/track/{event_id}?source=bayse
+POST   /api/v1/track/{event_id}?source=polymarket
+DELETE /api/v1/track/{event_id}?source=bayse
+DELETE /api/v1/track/{event_id}?source=polymarket
+```
+
+Important frontend rule:
+
+- when a card is clicked, carry the source into the route search state
+- when track/untrack is clicked, send the same source back to the backend
+
+For example, a TanStack Router detail navigation should look like:
+
+```ts
+navigate({
+  to: `/app/events/${event.id}`,
+  search: { source: event.source.toLowerCase() },
+})
+```
+
+Then the detail page should read `search.source` and pass it into the API call.
+
+## Discovery Feed Ordering
+
+The mixed discovery feed is intentionally backend-curated:
+
+- first 3 cards are Bayse
+- remaining cards are Polymarket ranked by liquidity/activity
+
+So the frontend should not reorder that mixed feed on its own.
+
+If the user clicks the Bayse or Poly filter buttons, the frontend should re-fetch from the backend with `source=...` instead of trying to filter the already-loaded mixed list locally.
+
+## Currency Notes
+
+Prism defaults to `NGN` at the app level, but Polymarket cards still come back as `USD`.
+
+That is expected.
+
+Frontend should render whatever `event.currency` says for each card/detail response instead of assuming the page-level currency applies to all sources uniformly.
+
+## Admin Discovery
+
+Admin discovery is also source-aware:
+
+```text
+GET /api/v1/admin/discovery?currency=NGN
+GET /api/v1/admin/discovery?currency=NGN&source=bayse
+GET /api/v1/admin/discovery?currency=NGN&source=polymarket
+```
+
+System tracking actions must also carry source:
+
+```text
+POST   /api/v1/admin/system-track/{event_id}?source=polymarket
+DELETE /api/v1/admin/system-track/{event_id}?source=polymarket
+```
+
+## UI Guidance
+
+Do not redesign the app because Polymarket was added.
+
+New market-source behavior should still follow the existing Prism visual system:
+
+- same card shell
+- same typography
+- same spacing rhythm
+- same button treatment
+- same loading skeleton style
+
+The source badge should be enough to distinguish Bayse from Polymarket. Do not create a separate “Polymarket theme”.
+
+With this setup, the browser only talks to `127.0.0.1:5173`, and Vite forwards API calls to FastAPI. That is why cookies work much more reliably in local development.
 
 If you use `fetch` instead of Axios, the important equivalent is:
 
@@ -189,6 +364,17 @@ Success response:
 
 Important behavior: signup also sets auth cookies. The frontend should not expect token strings in the body.
 
+Very important frontend flow note: the signup response contains the `uid` that the OTP verification route needs. That means the signup page should navigate to the OTP page with both:
+
+```ts
+{
+  email,
+  uid,
+}
+```
+
+Do not build OTP verification around email alone.
+
 ### `POST /auth/verify-otp`
 
 Request body:
@@ -212,6 +398,16 @@ or:
 ```
 
 For `signup`, success means the account is now verified.
+
+The frontend should call this route with:
+
+```ts
+await authApi.verifyOTP(uid, otp, 'signup')
+```
+
+not with `{ email, otp }`.
+
+For the Prism UX, once signup OTP verification succeeds, redirect straight to the main authenticated app page. Do not send the user back to login, because the backend already has enough information to set the auth cookies again on successful verification.
 
 For `forgotpassword`, success returns:
 
@@ -274,6 +470,8 @@ Request body:
 }
 ```
 
+This route is JSON-based. Do not send `application/x-www-form-urlencoded` and do not use an OAuth2 form helper here.
+
 Success response:
 
 ```json
@@ -295,6 +493,12 @@ Again, tokens are not returned in the body. The backend sets cookies.
 No request body is required on the frontend. The backend reads the refresh cookie automatically.
 
 Use this when a protected request fails with `401` and you want a silent session refresh attempt before redirecting the user to login.
+
+Do not call this blindly before any session exists. The safer pattern is:
+
+1. try `/auth/me`
+2. if it returns `401`, try `/auth/renew-access-token`
+3. if renew also returns `401`, redirect to login
 
 ### `POST /auth/logout`
 
@@ -725,6 +929,23 @@ active subscription count
 last websocket message time
 reconnect count
 ```
+
+The `websocket` field is now nested by source:
+
+```json
+{
+  "websocket": {
+    "bayse": { "...": "..." },
+    "polymarket": { "...": "..." }
+  },
+  "background_jobs": {
+    "baseline_scheduler_running": true,
+    "discovery_worker_running": true
+  }
+}
+```
+
+So the admin UI should render Bayse and Polymarket status separately instead of assuming one flat websocket object.
 
 This should live only in the admin area, not in the user-facing product.
 

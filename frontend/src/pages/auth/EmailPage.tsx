@@ -10,7 +10,7 @@ export function EmailPage() {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (email) {
-      navigate({ to: '/auth/otp', search: { email } });
+      navigate({ to: '/auth/otp', search: { email, uid: '' } });
     }
   };
 
@@ -36,11 +36,6 @@ export function EmailPage() {
             />
           </div>
           <Button type="submit" variant="primary" size="lg" className="mt-2">Send OTP</Button>
-          
-          <div className="mt-6 pt-6 border-t border-border text-center">
-            <p className="text-sm font-body text-text-muted mb-4">Want to expore the interface without an account?</p>
-            <Button type="button" variant="outline" size="md" className="w-full" onClick={() => navigate({ to: '/app' })}>Demo Access</Button>
-          </div>
         </form>
       </div>
     </div>

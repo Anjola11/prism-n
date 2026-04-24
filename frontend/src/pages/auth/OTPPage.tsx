@@ -10,23 +10,49 @@ export function OTPPage() {
   const routerState = useRouterState();
   const search = routerState.location.search as any;
   const email = search?.email || 'user@example.com';
+  const uid = search?.uid || '';
   const [otp, setOtp] = useState('');
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [isResending, setIsResending] = useState(false);
+  const [notice, setNotice] = useState('');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (otp.length === 6) {
       setIsLoading(true);
       setError('');
+      setNotice('');
       try {
-        await authApi.verifyOTP(email, otp);
-        navigate({ to: '/auth/login' });
+        if (!uid) {
+          throw new Error('Signup session missing. Please sign up again.');
+        }
+        await authApi.verifyOTP(uid, otp, 'signup');
+        navigate({ to: '/app' });
       } catch (err: any) {
         setError(err.response?.data?.detail || 'Invalid OTP or verification failed.');
       } finally {
         setIsLoading(false);
       }
+    }
+  };
+
+  const handleResend = async () => {
+    if (!email) {
+      setError('Signup session missing. Please sign up again.');
+      return;
+    }
+
+    setIsResending(true);
+    setError('');
+    setNotice('');
+    try {
+      await authApi.resendOTP(email, 'signup');
+      setNotice('A new OTP has been sent to your email.');
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to resend OTP.');
+    } finally {
+      setIsResending(false);
     }
   };
 
@@ -50,6 +76,12 @@ export function OTPPage() {
           </div>
         )}
 
+        {notice && (
+          <div className="mb-4 p-3 bg-emerald-400/10 border border-emerald-400/20 rounded text-emerald-400 text-xs">
+            {notice}
+          </div>
+        )}
+
         <form onSubmit={handleSubmit} className="flex flex-col gap-4">
           <div>
             <label className="block font-body text-sm text-text-secondary mb-2 text-center">Enter Code</label>
@@ -65,6 +97,9 @@ export function OTPPage() {
           </div>
           <Button type="submit" variant="primary" size="lg" className="mt-2" disabled={otp.length !== 6 || isLoading}>
             {isLoading ? 'Verifying...' : 'Verify Code'}
+          </Button>
+          <Button type="button" variant="ghost" size="sm" className="mt-1" onClick={handleResend} disabled={isResending}>
+            {isResending ? 'Resending...' : 'Resend OTP'}
           </Button>
           <Button type="button" variant="ghost" size="sm" className="mt-2" onClick={() => navigate({ to: '/auth/signup' })}>Back to Signup</Button>
         </form>
