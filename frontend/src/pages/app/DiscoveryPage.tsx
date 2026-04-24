@@ -1,6 +1,8 @@
-import React, { useLayoutEffect, useRef, useState } from 'react';
+import React, { useLayoutEffect, useRef, useState, useEffect } from 'react';
 import { useNavigate } from '@tanstack/react-router';
-import { mockEvents } from '../../data/mockEvents';
+import { marketsApi } from '../../lib/api/markets';
+import { mapDiscoveryEvent } from '../../lib/api/adapters';
+import type { DiscoveryCardViewModel } from '../../lib/api/types';
 import { SignalCard } from '../../components/ui/SignalCard';
 import gsap from 'gsap';
 import { Filter } from 'lucide-react';
@@ -9,8 +11,23 @@ export function DiscoveryPage() {
   const container = useRef<HTMLDivElement>(null);
   const [filter, setFilter] = useState<'ALL' | 'BAYSE' | 'POLYMARKET'>('ALL');
   const [tracked, setTracked] = useState<Record<string, boolean>>({});
+  const [events, setEvents] = useState<DiscoveryCardViewModel[]>([]);
+
+  useEffect(() => {
+    async function fetchEvents() {
+      try {
+        const apiEvents = await marketsApi.getEvents();
+        const mapped = apiEvents.map(mapDiscoveryEvent);
+        setEvents(mapped);
+      } catch (err) {
+        console.error("Failed to fetch events", err);
+      }
+    }
+    fetchEvents();
+  }, []);
 
   useLayoutEffect(() => {
+    if (events.length === 0) return;
     const ctx = gsap.context(() => {
       gsap.fromTo('.event-card-wrapper', 
         { opacity: 0, y: 15 },
@@ -25,16 +42,28 @@ export function DiscoveryPage() {
       );
     }, container);
     return () => ctx.revert();
-  }, [filter]);
+  }, [filter, events]);
 
-  const filteredEvents = mockEvents.filter(e => {
+  const filteredEvents = events.filter(e => {
     if (filter === 'ALL') return true;
     return e.source.toUpperCase() === filter;
   });
 
-  const toggleTrack = (e: React.MouseEvent, id: string) => {
+  const toggleTrack = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
-    setTracked(prev => ({ ...prev, [id]: !prev[id] }));
+    const isTracking = !tracked[id];
+    setTracked(prev => ({ ...prev, [id]: isTracking }));
+    try {
+      if (isTracking) {
+         await marketsApi.trackEvent(id);
+      } else {
+         await marketsApi.untrackEvent(id);
+      }
+    } catch (err) {
+      console.error("Tracking action failed", err);
+      // Revert optimism
+      setTracked(prev => ({ ...prev, [id]: !isTracking }));
+    }
   };
 
   return (

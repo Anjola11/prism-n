@@ -2,7 +2,8 @@ import React, { useState } from 'react';
 import { useNavigate } from '@tanstack/react-router';
 import { PrismLogo } from '../../components/brand/PrismLogo';
 import { Button } from '../../components/ui/Button';
-import { Eye, EyeOff } from 'lucide-react';
+import { Eye, EyeOff, AlertCircle } from 'lucide-react';
+import { authApi } from '../../lib/api/auth';
 
 export function SignupPage() {
   const navigate = useNavigate();
@@ -10,16 +11,29 @@ export function SignupPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
   
+  const [error, setError] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  
   // Validation state
   const passwordLengthMatch = formData.password.length >= 8;
   const passwordsMatch = formData.password === formData.confirm && formData.password.length > 0;
   const isValid = formData.email.includes('@') && passwordLengthMatch && passwordsMatch;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isValid) {
+    if (!isValid) return;
+
+    setIsLoading(true);
+    setError('');
+
+    try {
+      await authApi.register(formData.email, formData.password);
       // Navigate to OTP, passing email context via search params (v1 Tanstack routing syntax)
       navigate({ to: '/auth/otp', search: { email: formData.email } });
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to create account. Please try again.');
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -36,6 +50,13 @@ export function SignupPage() {
         <h2 className="text-2xl font-heading font-bold text-center text-text-primary mb-2">Create Account</h2>
         <p className="text-text-secondary text-sm text-center mb-8 font-body">Sign up for institutional-grade intelligence</p>
         
+        {error && (
+          <div className="mb-4 p-3 bg-amber-500/10 border border-amber-500/20 rounded text-amber-500 text-xs flex items-center gap-2">
+            <AlertCircle size={14} />
+            {error}
+          </div>
+        )}
+
         <form onSubmit={handleSubmit} className="flex flex-col gap-5">
           <div className="flex flex-col gap-2">
             <label className="font-mono text-xs text-text-secondary uppercase tracking-wider">Email Address</label>
@@ -92,16 +113,14 @@ export function SignupPage() {
             )}
           </div>
 
-          <Button type="submit" variant="primary" size="lg" className="mt-4" disabled={!isValid}>Sign Up</Button>
+          <Button type="submit" variant="primary" size="lg" className="mt-4" disabled={!isValid || isLoading}>
+            {isLoading ? 'Creating Account...' : 'Sign Up'}
+          </Button>
           
           <div className="flex flex-col items-center gap-4 mt-4">
             <p className="text-xs text-text-secondary font-body">
               Already have an account? <button type="button" onClick={() => navigate({ to: '/auth/login' })} className="text-prism-blue hover:underline">Log In</button>
             </p>
-            <div className="w-full h-px bg-border my-2"></div>
-            <Button type="button" variant="ghost" size="sm" onClick={() => navigate({ to: '/app' })} className="text-text-muted text-xs">
-              Demo Access (Bypass Auth)
-            </Button>
           </div>
         </form>
       </div>

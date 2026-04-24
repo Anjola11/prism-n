@@ -69,7 +69,7 @@ export const trackerRoute = createRoute({
 
 export const analysisRoute = createRoute({
   getParentRoute: () => appRoute,
-  path: '/events/$marketId',
+  path: '/events/$eventId',
   component: EventDetail,
 });
 

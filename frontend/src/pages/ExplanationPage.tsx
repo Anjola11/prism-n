@@ -2,7 +2,6 @@ import React, { useLayoutEffect, useRef, useState } from 'react';
 import { useNavigate } from '@tanstack/react-router';
 import { PrismLogo } from '../components/brand/PrismLogo';
 import { Button } from '../components/ui/Button';
-import { mockEvents } from '../data/mockEvents';
 import gsap from 'gsap';
 import { ScrollTrigger } from 'gsap/ScrollTrigger';
 import { Menu, X } from 'lucide-react';
@@ -14,8 +13,20 @@ export function ExplanationPage() {
   const navigate = useNavigate();
   const container = useRef<HTMLDivElement>(null);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
-  const demoEvent = mockEvents[0]; // Federal Reserve Event
-  const demoTopMarket = demoEvent.highest_scoring_market;
+  
+  const demoEvent = {
+    source: "Bayse",
+    title: "Federal Reserve rate cut by July 2026?",
+    total_liquidity: 12500000,
+    ai_insight: "Sustained buy pressure aligning with macroeconomic data releases supports the validity of the current move. The order book displays dense bids suggesting long-term conviction."
+  };
+  
+  const demoTopMarket = {
+    name: "YES",
+    probability_delta: 6,
+    signal: { score: 88 }
+  };
+
 
   useLayoutEffect(() => {
     const ctx = gsap.context(() => {

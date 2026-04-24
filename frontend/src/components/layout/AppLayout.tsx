@@ -1,14 +1,51 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { Outlet, useNavigate, useRouterState } from '@tanstack/react-router';
 import { PrismLogo } from '../brand/PrismLogo';
-import { Search, Bookmark } from 'lucide-react';
+import { Search, Bookmark, LogOut } from 'lucide-react';
+import { authApi } from '../../lib/api/auth';
 
 export function AppLayout() {
   const navigate = useNavigate();
   const routerState = useRouterState();
+  const [isAuthLoading, setIsAuthLoading] = useState(true);
+
+  useEffect(() => {
+    async function checkAuth() {
+      try {
+        await authApi.getMe();
+      } catch (err: any) {
+        if (err.response?.status === 401) {
+           try {
+             await authApi.renewAccessToken();
+             await authApi.getMe();
+           } catch (renewErr) {
+             navigate({ to: '/auth/login' });
+           }
+        } else {
+           navigate({ to: '/auth/login' });
+        }
+      } finally {
+        setIsAuthLoading(false);
+      }
+    }
+    checkAuth();
+  }, [navigate]);
+
+  const handleLogout = async () => {
+    try {
+      await authApi.logout();
+      navigate({ to: '/auth/login' });
+    } catch (err) {
+      console.error(err);
+    }
+  };
 
   const isDiscover = routerState.location.pathname === '/app';
   const isTracker = routerState.location.pathname === '/app/tracker';
+
+  if (isAuthLoading) {
+    return <div className="min-h-screen bg-void flex items-center justify-center text-text-muted font-mono text-sm">Authenticating...</div>;
+  }
 
   return (
     <div className="min-h-[100dvh] bg-void flex flex-col">
@@ -32,8 +69,8 @@ export function AppLayout() {
 
         {/* Right Section */}
         <div className="flex items-center gap-4">
-          <div className="w-8 h-8 rounded-full bg-prism-blue/20 border border-prism-blue/40 flex items-center justify-center cursor-pointer" onClick={() => navigate({ to: '/' })}>
-            <span className="font-mono text-xs text-prism-cyan">DM</span>
+          <div className="w-8 h-8 rounded-full bg-prism-blue/20 border border-prism-blue/40 flex items-center justify-center cursor-pointer hover:bg-prism-blue/30 transition-colors" onClick={handleLogout} title="Logout">
+            <LogOut size={14} className="text-prism-cyan" />
           </div>
         </div>
       </header>

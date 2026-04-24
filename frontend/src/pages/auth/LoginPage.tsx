@@ -2,19 +2,32 @@ import React, { useState } from 'react';
 import { useNavigate } from '@tanstack/react-router';
 import { PrismLogo } from '../../components/brand/PrismLogo';
 import { Button } from '../../components/ui/Button';
-import { Eye, EyeOff } from 'lucide-react';
+import { Eye, EyeOff, AlertCircle } from 'lucide-react';
+import { authApi } from '../../lib/api/auth';
 
 export function LoginPage() {
   const navigate = useNavigate();
   const [formData, setFormData] = useState({ email: '', password: '' });
   const [showPassword, setShowPassword] = useState(false);
+  const [error, setError] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  
   const isValid = formData.email.includes('@') && formData.password.length > 0;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isValid) {
-      // Hit generic /me endpoint, fallback to App Dashboard entry
+    if (!isValid) return;
+    
+    setIsLoading(true);
+    setError('');
+    
+    try {
+      await authApi.login(formData.email, formData.password);
       navigate({ to: '/app' });
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Invalid email or password');
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -30,6 +43,13 @@ export function LoginPage() {
         <h2 className="text-2xl font-heading font-bold text-center text-text-primary mb-2">Welcome Back</h2>
         <p className="text-text-secondary text-sm text-center mb-8 font-body">Sign in to Prism Intelligence</p>
         
+        {error && (
+          <div className="mb-4 p-3 bg-amber-500/10 border border-amber-500/20 rounded text-amber-500 text-xs flex items-center gap-2">
+            <AlertCircle size={14} />
+            {error}
+          </div>
+        )}
+
         <form onSubmit={handleSubmit} className="flex flex-col gap-5">
           <div className="flex flex-col gap-2">
             <label className="font-mono text-xs text-text-secondary uppercase tracking-wider">Email Address</label>
@@ -63,16 +83,14 @@ export function LoginPage() {
             </div>
           </div>
 
-          <Button type="submit" variant="primary" size="lg" className="mt-4" disabled={!isValid}>Log In</Button>
+          <Button type="submit" variant="primary" size="lg" className="mt-4" disabled={!isValid || isLoading}>
+            {isLoading ? 'Logging In...' : 'Log In'}
+          </Button>
           
           <div className="flex flex-col items-center gap-4 mt-4">
             <p className="text-xs text-text-secondary font-body">
               Don't have an account? <button type="button" onClick={() => navigate({ to: '/auth/signup' })} className="text-prism-blue hover:underline">Sign Up</button>
             </p>
-            <div className="w-full h-px bg-border my-2"></div>
-            <Button type="button" variant="ghost" size="sm" onClick={() => navigate({ to: '/app' })} className="text-text-muted text-xs">
-              Demo Access (Bypass Auth)
-            </Button>
           </div>
         </form>
       </div>
