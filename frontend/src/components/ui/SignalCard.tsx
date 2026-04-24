@@ -1,10 +1,10 @@
 import React from 'react';
-import type { PrismEvent } from '../../data/mockEvents';
+import type { DiscoveryCardViewModel } from '../../lib/api/types';
 import { Clock, Plus, Check } from 'lucide-react';
 import { useNavigate } from '@tanstack/react-router';
 
 interface SignalCardProps {
-  event: PrismEvent;
+  event: DiscoveryCardViewModel;
   onTrack?: (e: React.MouseEvent, id: string) => void;
   isTracked?: boolean;
 }
@@ -64,7 +64,7 @@ export function SignalCard({ event, onTrack, isTracked = false }: SignalCardProp
 
       {/* Target Subtitle (Conditional) */}
       <div className="mb-4 relative z-10">
-        {event.event_type === 'combined' ? (
+        {event.eventType === 'combined' ? (
           <p className="font-mono text-xs text-prism-teal">
             ↳ Spiking on: {topMarket.name} (Score: {signal.score})
           </p>
@@ -79,7 +79,7 @@ export function SignalCard({ event, onTrack, isTracked = false }: SignalCardProp
       <div className="bg-navy border border-border/50 rounded-lg p-3 mb-5 mt-auto">
         <p className="font-body text-xs text-text-secondary flex gap-2 line-clamp-2">
           <span className="text-prism-cyan flex-shrink-0">↳</span>
-          {event.ai_insight}
+          {event.aiInsight}
         </p>
       </div>
       
@@ -88,11 +88,11 @@ export function SignalCard({ event, onTrack, isTracked = false }: SignalCardProp
         <div className="flex items-center justify-between">
           <div className="flex flex-col gap-1">
             <span className="font-mono text-[9px] text-text-muted tracking-widest uppercase flex items-center gap-1">
-              <Clock size={10} /> {event.last_updated}
+              <Clock size={10} /> {event.lastUpdated || "Just now"}
             </span>
             <span className="font-mono text-sm text-text-primary">
               <span className="text-text-muted text-[10px] mr-1">POOL</span>
-              ${(event.total_liquidity / 1000000).toFixed(1)}M
+              ${(event.totalLiquidity / 1000000).toFixed(1)}M
             </span>
           </div>
           
