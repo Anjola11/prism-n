@@ -158,6 +158,39 @@ class MarketBaseline(SQLModel, table=True):
     )
 
 
+class MarketSignalSnapshot(SQLModel, table=True):
+    __tablename__ = "market_signal_snapshots"
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+
+    source: MarketSource = Field(default=MarketSource.BAYSE, index=True)
+    event_id: str = Field(index=True)
+    market_id: str = Field(index=True)
+    currency: Currency = Field(default=Currency.DOLLAR, index=True)
+
+    score: float
+    classification: str = Field(index=True)
+    formula: str | None = None
+    factors: dict | None = Field(default=None, sa_column=Column(pg.JSONB, nullable=True))
+    notes: list[str] | None = Field(default=None, sa_column=Column(pg.JSONB, nullable=True))
+
+    current_probability: float | None = None
+    previous_probability: float | None = None
+    probability_delta: float | None = None
+    event_liquidity: float | None = None
+    market_total_orders: int | None = None
+    event_total_orders: int | None = None
+    buy_notional: float | None = None
+    sell_notional: float | None = None
+    persistence_ticks: int | None = None
+
+    snapshot_reason: str = Field(default="signal_update", index=True)
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(pg.TIMESTAMP(timezone=True), nullable=False),
+    )
+
+
 class UserTrackedEvent(SQLModel, table=True):
     __tablename__ = "user_tracked_events"
 

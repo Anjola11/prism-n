@@ -3,9 +3,15 @@ import uuid
 from datetime import datetime, timezone, timedelta
 from pydantic import EmailStr
 import sqlalchemy.dialects.postgresql as pg
+from enum import Enum
 
 def utc_now():
     return datetime.now(timezone.utc)
+
+
+class UserRole(str, Enum):
+    USER = "user"
+    ADMIN = "admin"
 
 class User(SQLModel, table=True):
     __tablename__ = "users"
@@ -16,6 +22,7 @@ class User(SQLModel, table=True):
 
     email: EmailStr = Field(unique=True, index=True)
     email_verified: bool = Field(default=False)
+    role: UserRole = Field(default=UserRole.USER, index=True)
 
     password_hash: str = Field(exclude=True)
 

@@ -3,6 +3,7 @@ from typing import Any, Optional
 import uuid
 from pydantic import BaseModel, EmailStr, model_validator
 from enum import Enum
+from src.auth.models import UserRole
 
 class OtpTypes(str, Enum):
     SIGNUP = "signup"
@@ -12,6 +13,7 @@ class AuthUserOut(BaseModel):
     uid: uuid.UUID
     email: Optional[EmailStr] = None
     email_verified: Optional[bool] = None
+    role: UserRole = UserRole.USER
 
 class UserCreateInput(BaseModel):
     email: EmailStr
@@ -63,7 +65,7 @@ class UserLoginResponse(BaseModel):
 class RenewAccessTokenResponse(BaseModel):
     success: bool
     message: str
-    data: dict[str, str]
+    data: dict[str, Any]
 
 class LogoutResponse(BaseModel):
     success: bool

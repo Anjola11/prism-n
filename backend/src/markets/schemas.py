@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.markets.models import Currency, EventType, MarketEngine, MarketSource
 
@@ -66,6 +66,24 @@ class TrackEventResponse(BaseModel):
     tracking_enabled: bool = True
 
 
+class SignalRead(BaseModel):
+    score: float = 0.0
+    classification: str = "unscored"
+    direction: str = "STABLE"
+    formula: str | None = None
+    factors: dict | None = None
+    notes: list[str] = Field(default_factory=list)
+    detected_at: str | None = None
+
+
+class HighestScoringMarketRead(BaseModel):
+    market_id: str
+    market_title: str
+    current_probability: float | None = None
+    probability_delta: float = 0.0
+    signal: SignalRead
+
+
 class TrackedEventRead(BaseModel):
     event_id: str
     event_title: str
@@ -76,6 +94,9 @@ class TrackedEventRead(BaseModel):
     engine: MarketEngine
     tracked_markets_count: int
     tracking_enabled: bool
+    last_updated: str | None = None
+    ai_insight: str = "Insight unavailable"
+    highest_scoring_market: HighestScoringMarketRead | None = None
 
 
 class EventMarketRead(BaseModel):
@@ -91,6 +112,10 @@ class EventMarketRead(BaseModel):
     current_probability: float | None = None
     inverse_probability: float | None = None
     market_total_orders: int | None = None
+    probability_delta: float = 0.0
+    event_liquidity: float | None = None
+    signal: SignalRead = Field(default_factory=SignalRead)
+    last_updated: str | None = None
 
 
 class EventDetailRead(BaseModel):
@@ -108,6 +133,9 @@ class EventDetailRead(BaseModel):
     closing_date: datetime | None = None
     tracked_markets_count: int
     tracking_enabled: bool = False
+    last_updated: str | None = None
+    ai_insight: str = "Insight unavailable"
+    highest_scoring_market: HighestScoringMarketRead | None = None
     markets: list[EventMarketRead]
 
 
@@ -126,6 +154,9 @@ class DiscoveryEventRead(BaseModel):
     closing_date: datetime | None = None
     tracked_markets_count: int
     tracking_enabled: bool = False
+    last_updated: str | None = None
+    ai_insight: str = "Insight unavailable"
+    highest_scoring_market: HighestScoringMarketRead | None = None
 
 
 class SuccessResponse(BaseModel):

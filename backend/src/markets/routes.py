@@ -5,7 +5,6 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from src.db.main import get_session
 from src.markets.models import Currency
-from src.markets.live_state import LiveStateServices
 from src.markets.schemas import SuccessResponse
 from src.markets.services import MarketServices
 from src.utils.bayse import BayseServices
@@ -22,11 +21,13 @@ def get_bayse_service(request: Request) -> BayseServices:
 
 
 def get_market_services(
+    request: Request,
     bayse: BayseServices = Depends(get_bayse_service),
 ) -> MarketServices:
     return MarketServices(
         bayse=bayse,
-        live_state=LiveStateServices(),
+        live_state=request.app.state.live_state,
+        baseline_services=request.app.state.baseline_services,
     )
 
 

@@ -9,6 +9,10 @@ engine = create_async_engine(
     echo=False,
     pool_pre_ping=True,
     pool_recycle=300,
+    connect_args={
+        "statement_cache_size": 0,
+        "prepared_statement_cache_size": 0,
+    },
 )
 
 async def init_db():
@@ -16,7 +20,14 @@ async def init_db():
 
         #import models here
         from src.auth.models import User, SignupOtp, ForgotPasswordOtp
-        from src.markets.models import MarketBaseline, TrackedEventMetric, TrackedMarket, UserTrackedEvent
+        from src.admin.models import AdminActionLog
+        from src.markets.models import (
+            MarketBaseline,
+            MarketSignalSnapshot,
+            TrackedEventMetric,
+            TrackedMarket,
+            UserTrackedEvent,
+        )
         
         await conn.run_sync(SQLModel.metadata.create_all)
 

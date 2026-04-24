@@ -93,6 +93,7 @@ class AuthServices:
                 "uid": str(new_user.uid),
                 "email": new_user.email,
                 "email_verified": new_user.email_verified,
+                "role": new_user.role,
             }
 
         except Exception as e:
@@ -275,7 +276,13 @@ class AuthServices:
             detail="Invalid OTP type provided"
         )
             
-    async def login_user(self, loginInput: UserLoginInput, session: AsyncSession, response: Response):
+    async def login_user(
+        self,
+        loginInput: UserLoginInput,
+        session: AsyncSession,
+        response: Response,
+        required_role: str | None = None,
+    ):
         user = await self.get_user(loginInput.email, session, True)
         
         INVALID_CREDENTIALS = HTTPException(
@@ -290,6 +297,12 @@ class AuthServices:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail=f"Please verify your account before you can login. [UID:{user.uid}]"
+            )
+
+        if required_role and str(user.role) != required_role:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You are not permitted to use this login route",
             )
 
         # Verify password (strip to prevent accidental whitespace issues)
@@ -320,6 +333,7 @@ class AuthServices:
             'uid': str(user.uid),
             'email': user.email,
             'email_verified': user.email_verified,
+            'role': user.role,
         }
 
     async def forgot_password(self, forgot_password_input: ForgotPasswordInput, session: AsyncSession, background_tasks: BackgroundTasks):
@@ -405,7 +419,7 @@ class AuthServices:
                 detail="User not found"
             )
             
-        user_data = {"uid": user.uid, "email": user.email}
+        user_data = {"uid": user.uid, "email": user.email, "role": user.role}
 
         new_token = create_token(user_data, token_type="access")
         await self.add_token_to_blocklist(old_refresh_token_str)

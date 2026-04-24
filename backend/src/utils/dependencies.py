@@ -2,7 +2,7 @@ from fastapi import HTTPException, status, Depends, Request
 from sqlmodel.ext.asyncio.session import AsyncSession
 from src.utils.auth import decode_token
 from src.db.main import get_session
-from src.auth.models import User
+from src.auth.models import User, UserRole
 from src.db.redis import redis_client
 from sqlmodel import select
 import uuid
@@ -90,3 +90,20 @@ async def get_verified_user_id(
     current_user = Depends(get_verified_user)
 ):
     return current_user.uid
+
+
+async def get_admin_user(
+    current_user = Depends(get_verified_user)
+):
+    if current_user.role != UserRole.ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required",
+        )
+    return current_user
+
+
+async def get_admin_user_id(
+    admin_user = Depends(get_admin_user)
+):
+    return admin_user.uid

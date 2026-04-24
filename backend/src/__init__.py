@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from src.utils.logger import logger
 from src.auth.routes import auth_router
+from src.admin.routes import admin_router
 from src.markets.routes import markets_router
 
 from fastapi.responses import JSONResponse
@@ -14,6 +15,12 @@ from src.db.redis import redis_client, check_redis_connection
 from src.utils.logger import logger
 from src.config import Config
 from src.utils.bayse import BayseServices
+from src.markets.baselines import BaselineServices
+from src.markets.baseline_scheduler import BaselineRefreshScheduler
+from src.markets.live_state import LiveStateServices
+from src.markets.scoring import ScoringServices
+from src.markets.signal_snapshots import SignalSnapshotServices
+from src.markets.websocket_manager import BayseWebSocketManager
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -25,9 +32,40 @@ async def lifespan(app: FastAPI):
 
     app.state.bayse = BayseServices()
     logger.info("BayseServices started (HTTP Connection Pool ready)")
+    app.state.live_state = LiveStateServices()
+    app.state.baseline_services = BaselineServices(bayse=app.state.bayse)
+    app.state.scoring_services = ScoringServices()
+    app.state.signal_snapshot_services = SignalSnapshotServices()
+    app.state.bayse_ws_manager = BayseWebSocketManager(
+        bayse=app.state.bayse,
+        live_state=app.state.live_state,
+        baseline_services=app.state.baseline_services,
+        scoring_services=app.state.scoring_services,
+        signal_snapshot_services=app.state.signal_snapshot_services,
+    )
+    await app.state.bayse_ws_manager.start()
+    logger.info("Bayse websocket manager started")
+    app.state.baseline_scheduler = BaselineRefreshScheduler(
+        baseline_services=app.state.baseline_services,
+        on_refresh=app.state.bayse_ws_manager.reset_baseline_cache,
+    )
+    await app.state.baseline_scheduler.start()
+    logger.info("Baseline refresh scheduler started")
 
     yield
     
+    if hasattr(app.state, "baseline_scheduler"):
+        try:
+            await app.state.baseline_scheduler.stop()
+        except Exception as e:
+            logger.error(f"Error stopping baseline scheduler: {e}")
+
+    if hasattr(app.state, "bayse_ws_manager"):
+        try:
+            await app.state.bayse_ws_manager.stop()
+        except Exception as e:
+            logger.error(f"Error stopping Bayse websocket manager: {e}")
+
     if hasattr(app.state, "bayse"):
         try:
             await app.state.bayse.close()
@@ -71,11 +109,17 @@ def root_health_check():
 
 @app.get("/healthz")
 def health_check():
+    ws_manager = getattr(app.state, "bayse_ws_manager", None)
+    baseline_scheduler = getattr(app.state, "baseline_scheduler", None)
     return {
         "success": True,
         "message": "Server healthy",
         "data": {
             "status": "ok",
+            "bayse_websocket_running": bool(ws_manager and ws_manager._task and not ws_manager._task.done()),
+            "baseline_scheduler_running": bool(
+                baseline_scheduler and baseline_scheduler._task and not baseline_scheduler._task.done()
+            ),
         },
     }
 
@@ -117,4 +161,5 @@ async def custom_validation_exception_handler(request:Request, exc: RequestValid
 
 
 app.include_router(auth_router, prefix="/api/v1/auth", tags=["Authentication"])
+app.include_router(admin_router, prefix="/api/v1/admin", tags=["Admin"])
 app.include_router(markets_router, prefix="/api/v1", tags=["Markets"])
