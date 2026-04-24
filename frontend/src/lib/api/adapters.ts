@@ -23,6 +23,7 @@ export function mapDiscoveryEvent(apiEvent: DiscoveryEventApi): DiscoveryCardVie
   return {
     id: apiEvent.event_id,
     title: apiEvent.event_title,
+    iconUrl: apiEvent.event_icon_url || null,
     source: apiEvent.source,
     currency: apiEvent.currency,
     eventType: apiEvent.event_type,

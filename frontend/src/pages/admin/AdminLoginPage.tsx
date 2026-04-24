@@ -27,7 +27,12 @@ export function AdminLoginPage() {
       await adminApi.login(formData.email, formData.password);
       navigate({ to: adminBasePath });
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Admin login failed.');
+      const detail = err.response?.data?.detail;
+      if (typeof detail === 'string' && detail.trim()) {
+        setError(detail);
+      } else {
+        setError('Invalid admin email or password.');
+      }
     } finally {
       setIsLoading(false);
     }

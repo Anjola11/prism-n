@@ -231,8 +231,8 @@ class ScoringServices:
             notes.append("CLOB score used fallback assumptions for unsupported microstructure fields.")
         if formula == "amm" and factors.confidence is not None and factors.confidence < 0.25:
             notes.append("AMM confidence is weak because participation/liquidity support is limited.")
-        if metrics.baseline_sigma in (None, 0):
-            notes.append("Baseline sigma was missing, so move normalization used a conservative fallback.")
+        if metrics.baseline_sigma in (None, 0) and factors.move > 0:
+            notes.append("Historical baseline is still warming up, so move normalization used a conservative fallback.")
         if metrics.previous_probability is None:
             notes.append("Previous probability was missing, so move factor was neutralized.")
         return notes

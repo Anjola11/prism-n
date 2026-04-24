@@ -1,3 +1,5 @@
+import asyncio
+
 from fastapi import HTTPException, Request, Response, status
 from sqlalchemy import func
 from sqlmodel import select
@@ -21,9 +23,73 @@ from src.utils.logger import logger
 
 
 class AdminServices:
+    ANALYTICS_CACHE_TTL = 60
+    OVERVIEW_CACHE_TTL = 20
+
     def __init__(self, *, auth_services: AuthServices, market_services: MarketServices):
         self.auth_services = auth_services
         self.market_services = market_services
+
+    def _analytics_cache_id(self) -> str:
+        return "admin-analytics"
+
+    def _overview_cache_id(self, *, currency: Currency) -> str:
+        return f"admin-overview:{currency.value}"
+
+    async def _get_cached_analytics(self) -> AdminAnalyticsRead | None:
+        if not self.market_services.live_state:
+            return None
+        payload = await self.market_services.live_state.get_read_model(
+            namespace="admin-analytics",
+            identifier=self._analytics_cache_id(),
+        )
+        if not payload:
+            return None
+        return AdminAnalyticsRead.model_validate(payload)
+
+    async def _set_cached_analytics(self, analytics: AdminAnalyticsRead) -> None:
+        if not self.market_services.live_state:
+            return
+        await self.market_services.live_state.set_read_model(
+            namespace="admin-analytics",
+            identifier=self._analytics_cache_id(),
+            payload=analytics.model_dump(mode="json"),
+            ttl_seconds=self.ANALYTICS_CACHE_TTL,
+        )
+
+    async def _get_cached_overview(self, *, currency: Currency) -> AdminOverviewRead | None:
+        if not self.market_services.live_state:
+            return None
+        payload = await self.market_services.live_state.get_read_model(
+            namespace="admin-overview",
+            identifier=self._overview_cache_id(currency=currency),
+        )
+        if not payload:
+            return None
+        return AdminOverviewRead.model_validate(payload)
+
+    async def _set_cached_overview(self, *, currency: Currency, overview: AdminOverviewRead) -> None:
+        if not self.market_services.live_state:
+            return
+        await self.market_services.live_state.set_read_model(
+            namespace="admin-overview",
+            identifier=self._overview_cache_id(currency=currency),
+            payload=overview.model_dump(mode="json"),
+            ttl_seconds=self.OVERVIEW_CACHE_TTL,
+        )
+
+    async def _invalidate_admin_caches(self, *, currency: Currency | None = None) -> None:
+        if not self.market_services.live_state:
+            return
+        await self.market_services.live_state.delete_read_model(
+            namespace="admin-analytics",
+            identifier=self._analytics_cache_id(),
+        )
+        if currency is not None:
+            await self.market_services.live_state.delete_read_model(
+                namespace="admin-overview",
+                identifier=self._overview_cache_id(currency=currency),
+            )
 
     async def login_admin(
         self,
@@ -49,17 +115,29 @@ class AdminServices:
         websocket_status: dict,
         background_jobs: dict | None = None,
     ) -> AdminOverviewRead:
-        analytics = await self.get_admin_analytics(session=session)
-        system_status = await self.get_system_status(
-            websocket_status=websocket_status,
-            background_jobs=background_jobs,
-        )
-        system_tracked_events = await self.market_services.list_system_tracked_events(
-            session=session,
-            currency=currency,
+        cached_overview = await self._get_cached_overview(currency=currency)
+        if cached_overview is not None:
+            cached_overview.system_status = (
+                await self.get_system_status(
+                    websocket_status=websocket_status,
+                    background_jobs=background_jobs,
+                )
+            ).model_dump()
+            return cached_overview
+
+        analytics, system_status, system_tracked_events = await asyncio.gather(
+            self.get_admin_analytics(session=session),
+            self.get_system_status(
+                websocket_status=websocket_status,
+                background_jobs=background_jobs,
+            ),
+            self.market_services.list_system_tracked_events(
+                session=session,
+                currency=currency,
+            ),
         )
 
-        return AdminOverviewRead(
+        overview = AdminOverviewRead(
             total_users=analytics.total_users,
             verified_users=analytics.verified_users,
             admin_users=analytics.admin_users,
@@ -72,20 +150,34 @@ class AdminServices:
             system_tracked_events=system_tracked_events,
             system_status=system_status.model_dump(),
         )
+        await self._set_cached_overview(currency=currency, overview=overview)
+        return overview
 
     async def get_admin_analytics(
         self,
         *,
         session: AsyncSession,
     ) -> AdminAnalyticsRead:
-        total_users = len((await session.exec(select(User))).all())
-        verified_users = len(
-            (await session.exec(select(User).where(User.email_verified == True))).all()
-        )
-        admin_users = len((await session.exec(select(User).where(User.role == UserRole.ADMIN))).all())
-        total_user_event_links = len(
-            (await session.exec(select(UserTrackedEvent).where(UserTrackedEvent.tracking_enabled == True))).all()
-        )
+        cached_analytics = await self._get_cached_analytics()
+        if cached_analytics is not None:
+            return cached_analytics
+
+        total_users = (await session.exec(select(func.count()).select_from(User))).one()
+        verified_users = (
+            await session.exec(
+                select(func.count()).select_from(User).where(User.email_verified == True)
+            )
+        ).one()
+        admin_users = (
+            await session.exec(
+                select(func.count()).select_from(User).where(User.role == UserRole.ADMIN)
+            )
+        ).one()
+        total_user_event_links = (
+            await session.exec(
+                select(func.count()).select_from(UserTrackedEvent).where(UserTrackedEvent.tracking_enabled == True)
+            )
+        ).one()
 
         tracked_event_rows = (
             await session.exec(
@@ -94,30 +186,35 @@ class AdminServices:
                 .group_by(UserTrackedEvent.event_id)
             )
         ).all()
-        total_user_tracked_events = len(tracked_event_rows)
-
-        system_tracked_markets = (
+        total_user_tracked_events = (
             await session.exec(
-                select(TrackedMarket).where(
+                select(func.count(func.distinct(UserTrackedEvent.event_id))).where(
+                    UserTrackedEvent.tracking_enabled == True
+                )
+            )
+        ).one()
+
+        total_system_tracked_markets = (
+            await session.exec(
+                select(func.count()).select_from(TrackedMarket).where(
                     TrackedMarket.is_system_tracked == True,
                     TrackedMarket.tracking_enabled == True,
                 )
             )
-        ).all()
-        total_system_tracked_markets = len(system_tracked_markets)
+        ).one()
 
-        system_event_ids = {market.event_id for market in system_tracked_markets}
-        total_system_tracked_events = len(system_event_ids)
-
-        recent_signal_snapshot_count = len(
-            (
-                await session.exec(
-                    select(MarketSignalSnapshot)
-                    .order_by(MarketSignalSnapshot.created_at.desc())
-                    .limit(50)
+        total_system_tracked_events = (
+            await session.exec(
+                select(func.count(func.distinct(TrackedMarket.event_id))).where(
+                    TrackedMarket.is_system_tracked == True,
+                    TrackedMarket.tracking_enabled == True,
                 )
-            ).all()
-        )
+            )
+        ).one()
+
+        recent_signal_snapshot_count = (
+            await session.exec(select(func.count()).select_from(MarketSignalSnapshot))
+        ).one()
 
         event_meta = {}
         if tracked_event_rows:
@@ -151,7 +248,7 @@ class AdminServices:
                 )
             )
 
-        return AdminAnalyticsRead(
+        analytics = AdminAnalyticsRead(
             total_users=total_users,
             verified_users=verified_users,
             admin_users=admin_users,
@@ -162,6 +259,8 @@ class AdminServices:
             recent_signal_snapshot_count=recent_signal_snapshot_count,
             most_tracked_events=most_tracked_events,
         )
+        await self._set_cached_analytics(analytics)
+        return analytics
 
     async def get_system_status(
         self,
@@ -202,6 +301,7 @@ class AdminServices:
                 "source": source.value,
             },
         )
+        await self._invalidate_admin_caches(currency=currency)
         return result.model_dump()
 
     async def untrack_event_for_system(
@@ -231,6 +331,7 @@ class AdminServices:
                 "source": source.value,
             },
         )
+        await self._invalidate_admin_caches(currency=currency)
         return result.model_dump()
 
     async def list_admin_action_logs(

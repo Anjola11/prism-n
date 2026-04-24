@@ -29,11 +29,15 @@ export const adminApi = {
     return unwrap(response);
   },
   getAnalytics: async (): Promise<AdminAnalyticsApi> => {
-    const response = await api.get('/admin/analytics');
+    const response = await api.get('/admin/analytics', {
+      timeout: 15000,
+    });
     return unwrap(response);
   },
   getSystemStatus: async (): Promise<AdminSystemStatusApi> => {
-    const response = await api.get('/admin/system-status');
+    const response = await api.get('/admin/system-status', {
+      timeout: 10000,
+    });
     return unwrap(response);
   },
   getDiscovery: async (currency = DEFAULT_CURRENCY, source?: string): Promise<DiscoveryEventApi[]> => {
@@ -56,7 +60,10 @@ export const adminApi = {
     return unwrap(response);
   },
   getAuditLogs: async (limit = 20): Promise<AdminActionLogApi[]> => {
-    const response = await api.get('/admin/audit-logs', { params: { limit } });
+    const response = await api.get('/admin/audit-logs', {
+      params: { limit },
+      timeout: 10000,
+    });
     return unwrap(response) || [];
   },
 };

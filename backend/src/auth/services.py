@@ -410,16 +410,13 @@ class AuthServices:
                 detail=f"Please verify your account before you can login. [UID:{user.uid}]"
             )
 
-        if required_role and user.role.value != required_role:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You are not permitted to use this login route",
-            )
-
         # Verify password (strip to prevent accidental whitespace issues)
         verified_password = verify_password_hash(loginInput.password.strip(), user.password_hash)
 
         if not verified_password:
+            raise INVALID_CREDENTIALS
+
+        if required_role and user.role.value != required_role:
             raise INVALID_CREDENTIALS
 
         user_dict = user.model_dump()

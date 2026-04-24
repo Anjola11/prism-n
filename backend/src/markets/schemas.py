@@ -88,6 +88,7 @@ class TrackedEventRead(BaseModel):
     event_id: str
     event_title: str
     event_slug: str | None = None
+    event_icon_url: str | None = None
     source: MarketSource
     currency: Currency
     event_type: EventType
@@ -118,6 +119,8 @@ class EventMarketRead(BaseModel):
     current_probability: float | None = None
     inverse_probability: float | None = None
     market_total_orders: int | None = None
+    buy_notional: float | None = None
+    sell_notional: float | None = None
     probability_delta: float = 0.0
     event_liquidity: float | None = None
     signal: SignalRead = Field(default_factory=SignalRead)
@@ -128,6 +131,7 @@ class EventDetailRead(BaseModel):
     event_id: str
     event_title: str
     event_slug: str | None = None
+    event_icon_url: str | None = None
     source: MarketSource
     currency: Currency
     event_type: EventType
@@ -150,6 +154,7 @@ class DiscoveryEventRead(BaseModel):
     event_id: str
     event_title: str
     event_slug: str | None = None
+    event_icon_url: str | None = None
     source: MarketSource
     currency: Currency
     event_type: EventType

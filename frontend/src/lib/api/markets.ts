@@ -22,7 +22,10 @@ export const marketsApi = {
     return unwrap(response);
   },
   getTracker: async (currency = DEFAULT_CURRENCY): Promise<DiscoveryEventApi[]> => {
-    const response = await api.get('/tracker', { params: { currency } });
+    const response = await api.get('/tracker', {
+      params: { currency },
+      timeout: 45000,
+    });
     return unwrap(response) || [];
   },
 };

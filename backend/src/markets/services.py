@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -38,9 +39,9 @@ from src.utils.polymarket import PolymarketServices
 
 
 class MarketServices:
-    DISCOVERY_LISTINGS_CACHE_TTL = 30
-    TRACKER_CACHE_TTL = 10
-    EVENT_DETAIL_CACHE_TTL = 10
+    DISCOVERY_LISTINGS_CACHE_TTL = 60
+    TRACKER_CACHE_TTL = 45
+    EVENT_DETAIL_CACHE_TTL = 15
 
     def __init__(
         self,
@@ -160,15 +161,17 @@ class MarketServices:
         live_market = None
         live_signal = None
         if self.live_state:
-            live_market = await self.live_state.get_market_state(
-                source=market.source,
-                market_id=market.market_id,
-                currency=currency,
-            )
-            live_signal = await self.live_state.get_signal_state(
-                source=market.source,
-                market_id=market.market_id,
-                currency=currency,
+            live_market, live_signal = await asyncio.gather(
+                self.live_state.get_market_state(
+                    source=market.source,
+                    market_id=market.market_id,
+                    currency=currency,
+                ),
+                self.live_state.get_signal_state(
+                    source=market.source,
+                    market_id=market.market_id,
+                    currency=currency,
+                ),
             )
 
         current_probability = getattr(live_market, "current_probability", None)
@@ -201,10 +204,30 @@ class MarketServices:
             current_probability=current_probability,
             inverse_probability=inverse_probability,
             market_total_orders=market_total_orders,
+            buy_notional=getattr(live_market, "buy_notional", None),
+            sell_notional=getattr(live_market, "sell_notional", None),
             probability_delta=probability_delta,
             event_liquidity=getattr(live_market, "event_liquidity", event_liquidity),
             signal=self._build_signal_read(signal_state=live_signal, market_state=live_market),
             last_updated=getattr(live_market, "last_updated_at", None),
+        )
+
+    async def _build_market_reads(
+        self,
+        *,
+        markets: list[TrackedMarketCreate | TrackedMarket],
+        currency: Currency,
+        event_liquidity: float | None = None,
+    ) -> list[EventMarketRead]:
+        return await asyncio.gather(
+            *[
+                self._build_market_read(
+                    market=market,
+                    currency=currency,
+                    event_liquidity=event_liquidity,
+                )
+                for market in markets
+            ]
         )
 
     def _build_highest_scoring_market(
@@ -229,6 +252,18 @@ class MarketServices:
             signal=highest.signal,
         )
 
+    def _get_event_icon_url(
+        self,
+        *,
+        markets: list[TrackedMarketCreate | TrackedMarket],
+    ) -> str | None:
+        for market in markets:
+            if getattr(market, "market_image_128_url", None):
+                return market.market_image_128_url
+            if getattr(market, "market_image_url", None):
+                return market.market_image_url
+        return None
+
     async def _get_live_event_metadata(
         self,
         *,
@@ -247,6 +282,53 @@ class MarketServices:
         if not live_event:
             return None, None
         return live_event.total_liquidity, live_event.last_synced_at
+
+    async def _get_live_event_metadata_bulk(
+        self,
+        *,
+        keys: list[tuple[MarketSource, str, Currency]],
+    ) -> dict[tuple[MarketSource, str, Currency], tuple[float | None, str | None]]:
+        if not keys:
+            return {}
+        results = await asyncio.gather(
+            *[
+                self._get_live_event_metadata(
+                    source=source,
+                    event_id=event_id,
+                    currency=currency,
+                )
+                for source, event_id, currency in keys
+            ]
+        )
+        return {
+            key: result
+            for key, result in zip(keys, results, strict=False)
+        }
+
+    async def _get_event_metrics_bulk(
+        self,
+        *,
+        session: AsyncSession,
+        keys: list[tuple[str, MarketSource, Currency]],
+    ) -> dict[tuple[str, MarketSource, Currency], TrackedEventMetric]:
+        if not keys:
+            return {}
+        event_ids = sorted({event_id for event_id, _, _ in keys})
+        sources = sorted({source for _, source, _ in keys}, key=lambda item: item.value)
+        currencies = sorted({currency for _, _, currency in keys}, key=lambda item: item.value)
+        rows = (
+            await session.exec(
+                select(TrackedEventMetric).where(
+                    TrackedEventMetric.event_id.in_(event_ids),
+                    TrackedEventMetric.source.in_(sources),
+                    TrackedEventMetric.currency.in_(currencies),
+                )
+            )
+        ).all()
+        return {
+            (row.event_id, row.source, row.currency): row
+            for row in rows
+        }
 
     async def _seed_initial_signal_states(
         self,
@@ -631,20 +713,18 @@ class MarketServices:
             raise ValueError("Cannot group an empty tracked market list")
 
         first_market = markets[0]
-        grouped_markets = [
-            await self._build_market_read(
-                market=market,
-                currency=currency,
-                event_liquidity=total_liquidity,
-            )
-            for market in markets
-        ]
+        grouped_markets = await self._build_market_reads(
+            markets=markets,
+            currency=currency,
+            event_liquidity=total_liquidity,
+        )
         highest_scoring_market = self._build_highest_scoring_market(grouped_markets)
 
         return EventDetailRead(
             event_id=first_market.event_id,
             event_title=first_market.event_title,
             event_slug=first_market.event_slug,
+            event_icon_url=self._get_event_icon_url(markets=markets),
             source=first_market.source,
             currency=currency,
             event_type=first_market.event_type,
@@ -661,6 +741,45 @@ class MarketServices:
             ai_insight="Insight unavailable",
             highest_scoring_market=highest_scoring_market,
             markets=grouped_markets,
+        )
+
+    async def _build_tracked_event_summary(
+        self,
+        *,
+        event_id: str,
+        markets: list[TrackedMarket],
+        tracked_event: UserTrackedEvent | None,
+        effective_currency: Currency,
+        metric: TrackedEventMetric | None,
+        live_total_liquidity: float | None,
+        live_last_updated: str | None,
+    ) -> TrackedEventRead:
+        first_market = markets[0]
+        grouped_market_reads = await self._build_market_reads(
+            markets=markets,
+            currency=effective_currency,
+            event_liquidity=live_total_liquidity if live_total_liquidity is not None else (metric.total_liquidity if metric else None),
+        )
+        return TrackedEventRead(
+            event_id=first_market.event_id,
+            event_title=first_market.event_title,
+            event_slug=first_market.event_slug,
+            event_icon_url=self._get_event_icon_url(markets=markets),
+            source=first_market.source,
+            currency=metric.currency if metric else effective_currency,
+            event_type=first_market.event_type,
+            category=first_market.category,
+            status=first_market.status,
+            engine=first_market.engine,
+            total_liquidity=live_total_liquidity if live_total_liquidity is not None else (metric.total_liquidity if metric else None),
+            event_total_orders=first_market.event_total_orders,
+            closing_date=first_market.closing_date,
+            tracked_markets_count=len(markets),
+            tracking_enabled=tracked_event.tracking_enabled if tracked_event else True,
+            data_mode="tracked_live",
+            last_updated=live_last_updated,
+            ai_insight="Insight unavailable",
+            highest_scoring_market=self._build_highest_scoring_market(grouped_market_reads),
         )
 
     async def _build_discovery_read_for_tracked_event(
@@ -1132,62 +1251,66 @@ class MarketServices:
         )
         result = await session.exec(statement)
         tracked_events = result.all()
+        tracked_event_map = {tracked_event.event_id: tracked_event for tracked_event in tracked_events}
+        event_ids = list(tracked_event_map)
+        if not event_ids:
+            return []
 
-        response: list[TrackedEventRead] = []
-        for tracked_event in tracked_events:
-            markets_statement = select(TrackedMarket).where(
-                TrackedMarket.event_id == tracked_event.event_id,
-                TrackedMarket.tracking_enabled == True,
+        all_markets = (
+            await session.exec(
+                select(TrackedMarket).where(
+                    TrackedMarket.event_id.in_(event_ids),
+                    TrackedMarket.tracking_enabled == True,
+                )
             )
-            markets_result = await session.exec(markets_statement)
-            markets = markets_result.all()
+        ).all()
+
+        grouped_markets_by_event: dict[str, list[TrackedMarket]] = {}
+        for market in all_markets:
+            grouped_markets_by_event.setdefault(market.event_id, []).append(market)
+
+        event_metric_keys: list[tuple[str, MarketSource, Currency]] = []
+        live_metadata_keys: list[tuple[MarketSource, str, Currency]] = []
+        effective_currency_by_event: dict[str, Currency] = {}
+        for event_id, markets in grouped_markets_by_event.items():
+            first_market = markets[0]
+            effective_currency = Currency.DOLLAR if first_market.source == MarketSource.POLYMARKET else currency
+            effective_currency_by_event[event_id] = effective_currency
+            event_metric_keys.append((event_id, first_market.source, effective_currency))
+            live_metadata_keys.append((first_market.source, event_id, effective_currency))
+
+        metrics_map, live_metadata_map = await asyncio.gather(
+            self._get_event_metrics_bulk(session=session, keys=event_metric_keys),
+            self._get_live_event_metadata_bulk(keys=live_metadata_keys),
+        )
+
+        build_tasks = []
+        for event_id in event_ids:
+            markets = grouped_markets_by_event.get(event_id, [])
             if not markets:
-                logger.warning("No tracked markets found for event %s", tracked_event.event_id)
+                logger.warning("No tracked markets found for event %s", event_id)
                 continue
 
             first_market = markets[0]
-            effective_currency = Currency.DOLLAR if first_market.source == MarketSource.POLYMARKET else currency
-            metric = await self._get_event_metric(
-                session,
-                event_id=first_market.event_id,
-                source=first_market.source,
-                currency=effective_currency,
+            effective_currency = effective_currency_by_event[event_id]
+            metric = metrics_map.get((event_id, first_market.source, effective_currency))
+            live_total_liquidity, live_last_updated = live_metadata_map.get(
+                (first_market.source, event_id, effective_currency),
+                (None, None),
             )
-            live_total_liquidity, live_last_updated = await self._get_live_event_metadata(
-                source=first_market.source,
-                event_id=first_market.event_id,
-                currency=effective_currency,
-            )
-            grouped_markets = [
-                await self._build_market_read(
-                    market=market,
-                    currency=effective_currency,
-                    event_liquidity=live_total_liquidity if live_total_liquidity is not None else (metric.total_liquidity if metric else None),
-                )
-                for market in markets
-            ]
-            response.append(
-                TrackedEventRead(
-                    event_id=first_market.event_id,
-                    event_title=first_market.event_title,
-                    event_slug=first_market.event_slug,
-                    source=first_market.source,
-                    currency=metric.currency if metric else effective_currency,
-                    event_type=first_market.event_type,
-                    category=first_market.category,
-                    status=first_market.status,
-                    engine=first_market.engine,
-                    total_liquidity=live_total_liquidity if live_total_liquidity is not None else (metric.total_liquidity if metric else None),
-                    event_total_orders=first_market.event_total_orders,
-                    closing_date=first_market.closing_date,
-                    tracked_markets_count=len(markets),
-                    tracking_enabled=tracked_event.tracking_enabled,
-                    data_mode="tracked_live",
-                    last_updated=live_last_updated,
-                    ai_insight="Insight unavailable",
-                    highest_scoring_market=self._build_highest_scoring_market(grouped_markets),
+            build_tasks.append(
+                self._build_tracked_event_summary(
+                    event_id=event_id,
+                    markets=markets,
+                    tracked_event=tracked_event_map.get(event_id),
+                    effective_currency=effective_currency,
+                    metric=metric,
+                    live_total_liquidity=live_total_liquidity,
+                    live_last_updated=live_last_updated,
                 )
             )
+
+        response = await asyncio.gather(*build_tasks) if build_tasks else []
 
         logger.info("Listed %s tracked events for user %s", len(response), user_id)
         await self._set_cached_tracker_response(user_id=user_id, currency=currency, response=response)
@@ -1221,51 +1344,43 @@ class MarketServices:
         for market in markets:
             grouped.setdefault(market.event_id, []).append(market)
 
-        response: list[TrackedEventRead] = []
-        for event_markets in grouped.values():
+        event_metric_keys: list[tuple[str, MarketSource, Currency]] = []
+        live_metadata_keys: list[tuple[MarketSource, str, Currency]] = []
+        effective_currency_by_event: dict[str, Currency] = {}
+        for event_id, event_markets in grouped.items():
             first_market = event_markets[0]
             effective_currency = Currency.DOLLAR if first_market.source == MarketSource.POLYMARKET else currency
-            metric = await self._get_event_metric(
-                session,
-                event_id=first_market.event_id,
-                source=first_market.source,
-                currency=effective_currency,
+            effective_currency_by_event[event_id] = effective_currency
+            event_metric_keys.append((event_id, first_market.source, effective_currency))
+            live_metadata_keys.append((first_market.source, event_id, effective_currency))
+
+        metrics_map, live_metadata_map = await asyncio.gather(
+            self._get_event_metrics_bulk(session=session, keys=event_metric_keys),
+            self._get_live_event_metadata_bulk(keys=live_metadata_keys),
+        )
+
+        build_tasks = []
+        for event_id, event_markets in grouped.items():
+            first_market = event_markets[0]
+            effective_currency = effective_currency_by_event[event_id]
+            metric = metrics_map.get((event_id, first_market.source, effective_currency))
+            live_total_liquidity, live_last_updated = live_metadata_map.get(
+                (first_market.source, event_id, effective_currency),
+                (None, None),
             )
-            live_total_liquidity, live_last_updated = await self._get_live_event_metadata(
-                source=first_market.source,
-                event_id=first_market.event_id,
-                currency=effective_currency,
-            )
-            grouped_markets = [
-                await self._build_market_read(
-                    market=market,
-                    currency=effective_currency,
-                    event_liquidity=live_total_liquidity if live_total_liquidity is not None else (metric.total_liquidity if metric else None),
-                )
-                for market in event_markets
-            ]
-            response.append(
-                TrackedEventRead(
-                    event_id=first_market.event_id,
-                    event_title=first_market.event_title,
-                    event_slug=first_market.event_slug,
-                    source=first_market.source,
-                    currency=metric.currency if metric else effective_currency,
-                    event_type=first_market.event_type,
-                    category=first_market.category,
-                    status=first_market.status,
-                    engine=first_market.engine,
-                    total_liquidity=live_total_liquidity if live_total_liquidity is not None else (metric.total_liquidity if metric else None),
-                    event_total_orders=first_market.event_total_orders,
-                    closing_date=first_market.closing_date,
-                    tracked_markets_count=len(event_markets),
-                    tracking_enabled=True,
-                    data_mode="tracked_live",
-                    last_updated=live_last_updated,
-                    ai_insight="Insight unavailable",
-                    highest_scoring_market=self._build_highest_scoring_market(grouped_markets),
+            build_tasks.append(
+                self._build_tracked_event_summary(
+                    event_id=event_id,
+                    markets=event_markets,
+                    tracked_event=None,
+                    effective_currency=effective_currency,
+                    metric=metric,
+                    live_total_liquidity=live_total_liquidity,
+                    live_last_updated=live_last_updated,
                 )
             )
+
+        response = await asyncio.gather(*build_tasks) if build_tasks else []
 
         response.sort(key=lambda item: item.event_title)
 
@@ -1275,7 +1390,7 @@ class MarketServices:
                 namespace="tracker-feed",
                 identifier=cache_id,
                 payload=[item.model_dump(mode="json") for item in response],
-                ttl_seconds=30,
+                ttl_seconds=self.TRACKER_CACHE_TTL,
             )
 
         return response
@@ -1340,7 +1455,33 @@ class MarketServices:
             currency = Currency.DOLLAR
         logger.info("Fetching event detail for user %s and event %s in %s", user_id, event_id, currency.value)
         cached_detail = await self._get_cached_event_detail(event_id=event_id, currency=currency)
-        if cached_detail is not None and cached_detail.source == source:
+        tracked_markets_for_event = (
+            await session.exec(
+                select(TrackedMarket).where(
+                    TrackedMarket.event_id == event_id,
+                    TrackedMarket.tracking_enabled == True,
+                )
+            )
+        ).all()
+        authoritative_source = tracked_markets_for_event[0].source if tracked_markets_for_event else source
+        if authoritative_source == MarketSource.POLYMARKET:
+            currency = Currency.DOLLAR
+
+        if cached_detail is None or cached_detail.source != authoritative_source:
+            authoritative_cached_detail = await self._get_cached_event_detail(event_id=event_id, currency=currency)
+            if authoritative_cached_detail is not None and authoritative_cached_detail.source == authoritative_source:
+                tracking_enabled = await self._get_user_tracking_status(
+                    session=session,
+                    user_id=user_id,
+                    event_id=event_id,
+                )
+                logger.info("Serving authoritative event detail for %s in %s from Redis cache", event_id, currency.value)
+                return self._clone_event_detail_with_tracking(
+                    cached_detail=authoritative_cached_detail,
+                    tracking_enabled=tracking_enabled,
+                )
+
+        if cached_detail is not None and cached_detail.source == authoritative_source:
             tracking_enabled = await self._get_user_tracking_status(
                 session=session,
                 user_id=user_id,
@@ -1352,17 +1493,15 @@ class MarketServices:
                 tracking_enabled=tracking_enabled,
             )
 
-        statement = select(TrackedMarket).where(
-            TrackedMarket.event_id == event_id,
-            TrackedMarket.tracking_enabled == True,
-            TrackedMarket.source == source,
-        )
-        result = await session.exec(statement)
-        markets = result.all()
+        markets = [
+            market
+            for market in tracked_markets_for_event
+            if market.source == authoritative_source
+        ]
 
         if not markets:
-            logger.info("Event %s not in DB yet, fetching from source %s", event_id, source.value)
-            if source == MarketSource.POLYMARKET:
+            logger.info("Event %s not in DB yet, fetching from source %s", event_id, authoritative_source.value)
+            if authoritative_source == MarketSource.POLYMARKET:
                 if not self.polymarket:
                     raise HTTPException(
                         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -1378,18 +1517,16 @@ class MarketServices:
             else:
                 event_payload = await self.bayse.get_event_by_id(event_id=event_id, currency=currency)
                 normalized = self.normalize_event_to_tracked_markets(event_payload, currency=currency)
-            grouped_markets = [
-                await self._build_market_read(
-                    market=market,
-                    currency=currency,
-                    event_liquidity=normalized.total_liquidity,
-                )
-                for market in normalized.markets
-            ]
+            grouped_markets = await self._build_market_reads(
+                markets=normalized.markets,
+                currency=currency,
+                event_liquidity=normalized.total_liquidity,
+            )
             response = EventDetailRead(
                 event_id=normalized.event_id,
                 event_title=normalized.event_title,
                 event_slug=normalized.event_slug,
+                event_icon_url=self._get_event_icon_url(markets=normalized.markets),
                 source=normalized.source,
                 currency=normalized.currency,
                 event_type=normalized.event_type,

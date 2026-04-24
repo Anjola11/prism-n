@@ -59,6 +59,8 @@ export function SignalCard({ event, onTrack, isTracked = false }: SignalCardProp
     navigate({ to: `/app/events/${event.id}`, search: { source: event.source.toLowerCase() } });
   };
 
+  const iconFallback = event.source === 'POLYMARKET' ? 'P' : 'B';
+
   return (
     <div
       className={`group relative flex h-full cursor-pointer flex-col overflow-hidden rounded-xl border bg-navy-mid p-5 shadow-card transition-all duration-300 hover:shadow-modal ${borderColor}`}
@@ -73,9 +75,23 @@ export function SignalCard({ event, onTrack, isTracked = false }: SignalCardProp
         </span>
       </div>
 
-      <h3 className="relative z-10 mb-1 pr-2 font-heading text-lg font-medium leading-[1.35] text-text-primary transition-colors group-hover:text-white line-clamp-2">
-        {event.title}
-      </h3>
+      <div className="relative z-10 mb-2 flex items-start gap-3 pr-2">
+        <div className="mt-0.5 flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-xl border border-border/60 bg-navy shadow-sm">
+          {event.iconUrl ? (
+            <img
+              src={event.iconUrl}
+              alt=""
+              className="h-full w-full object-cover"
+              loading="lazy"
+            />
+          ) : (
+            <span className="font-mono text-sm font-bold text-text-secondary">{iconFallback}</span>
+          )}
+        </div>
+        <h3 className="min-w-0 flex-1 font-heading text-lg font-medium leading-[1.35] text-text-primary transition-colors group-hover:text-white line-clamp-2">
+          {event.title}
+        </h3>
+      </div>
 
       <div className="relative z-10 mb-4">
         {event.eventType === 'combined' && topMarket ? (

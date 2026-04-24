@@ -1,4 +1,5 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
 import { adminApi } from '../../lib/api/admin';
 import { mapDiscoveryEvent } from '../../lib/api/adapters';
@@ -7,44 +8,43 @@ import { SignalCard } from '../../components/ui/SignalCard';
 
 export function AdminDiscoveryPage() {
   const [filter, setFilter] = useState<'ALL' | 'BAYSE' | 'POLYMARKET'>('ALL');
-  const [events, setEvents] = useState<DiscoveryCardViewModel[]>([]);
-  const [tracked, setTracked] = useState<Record<string, boolean>>({});
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState('');
+  const queryClient = useQueryClient();
 
-  useEffect(() => {
-    async function fetchDiscovery() {
-      try {
-        const response = await adminApi.getDiscovery(undefined, filter === 'ALL' ? undefined : filter.toLowerCase());
-        const mapped = response.map(mapDiscoveryEvent);
-        setEvents(mapped);
-        setTracked(Object.fromEntries(mapped.map((event) => [event.id, event.trackingEnabled])));
-      } catch (err) {
-        console.error('Failed to load admin discovery', err);
-        setError('Failed to load admin discovery.');
-      } finally {
-        setIsLoading(false);
+  const discoveryQuery = useQuery({
+    queryKey: ['admin-discovery', filter],
+    queryFn: async () => {
+      const response = await adminApi.getDiscovery(undefined, filter === 'ALL' ? undefined : filter.toLowerCase());
+      return response.map(mapDiscoveryEvent);
+    },
+    staleTime: 30_000,
+    gcTime: 5 * 60_000,
+    refetchInterval: 30_000,
+    placeholderData: (previousData) => previousData,
+  });
+
+  const toggleMutation = useMutation({
+    mutationFn: async ({ eventId, shouldTrack, source }: { eventId: string; shouldTrack: boolean; source: string }) => {
+      if (shouldTrack) {
+        return adminApi.systemTrack(eventId, undefined, source);
       }
-    }
+      return adminApi.systemUntrack(eventId, undefined, source);
+    },
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['admin-discovery'] }),
+        queryClient.invalidateQueries({ queryKey: ['admin-system-tracker'] }),
+        queryClient.invalidateQueries({ queryKey: ['admin-overview'] }),
+      ]);
+    },
+  });
 
-    fetchDiscovery();
-  }, [filter]);
+  const events = discoveryQuery.data || [];
 
   const toggleSystemTrack = async (e: React.MouseEvent, eventId: string, source: string) => {
     e.stopPropagation();
-    const nextState = !tracked[eventId];
-    setTracked((prev) => ({ ...prev, [eventId]: nextState }));
-
-    try {
-      if (nextState) {
-        await adminApi.systemTrack(eventId, undefined, source);
-      } else {
-        await adminApi.systemUntrack(eventId, undefined, source);
-      }
-    } catch (err) {
-      console.error('System tracking action failed', err);
-      setTracked((prev) => ({ ...prev, [eventId]: !nextState }));
-    }
+    const current = events.find((event) => event.id === eventId);
+    const shouldTrack = !current?.trackingEnabled;
+    await toggleMutation.mutateAsync({ eventId, shouldTrack, source });
   };
 
   return (
@@ -68,19 +68,21 @@ export function AdminDiscoveryPage() {
         ))}
       </div>
 
-      {isLoading && <div className="font-mono text-sm text-text-muted">Loading admin discovery...</div>}
-      {error && !isLoading && (
+      {discoveryQuery.isLoading && !discoveryQuery.data && (
+        <div className="font-mono text-sm text-text-muted">Loading admin discovery...</div>
+      )}
+      {discoveryQuery.isError && (
         <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 p-4 text-sm text-amber-500">
-          {error}
+          Failed to load admin discovery.
         </div>
       )}
 
       <div className="grid grid-cols-1 gap-5 md:grid-cols-2 lg:grid-cols-3">
-        {!isLoading && events.map((event) => (
+        {events.map((event: DiscoveryCardViewModel) => (
           <SignalCard
             key={event.id}
             event={event}
-            isTracked={!!tracked[event.id]}
+            isTracked={!!event.trackingEnabled}
             onTrack={toggleSystemTrack}
           />
         ))}

@@ -33,6 +33,7 @@ export interface DiscoveryEventApi {
   event_id: string;
   event_title: string;
   event_slug: string | null;
+  event_icon_url?: string | null;
   source: string;
   currency: string;
   event_type: string;
@@ -63,6 +64,8 @@ export interface EventMarketApi {
   current_probability: number | null;
   inverse_probability: number | null;
   market_total_orders: number | null;
+  buy_notional: number | null;
+  sell_notional: number | null;
   probability_delta: number;
   event_liquidity: number | null;
   signal: SignalApi;
@@ -86,13 +89,23 @@ export interface MostTrackedEventApi {
 export interface AdminSystemStatusApi {
   redis_ok: boolean;
   websocket: {
-    connected: boolean;
-    reconnect_count?: number;
-    last_message_at?: string | null;
-    active_event_subscriptions?: number;
-    active_orderbook_subscriptions?: number;
+    bayse?: {
+      connected: boolean;
+      reconnect_count?: number;
+      last_message_at?: string | null;
+      active_subscription_count?: number;
+      [key: string]: unknown;
+    };
+    polymarket?: {
+      connected: boolean;
+      reconnect_count?: number;
+      last_message_at?: string | null;
+      active_asset_count?: number;
+      [key: string]: unknown;
+    };
     [key: string]: unknown;
   };
+  background_jobs?: Record<string, boolean>;
 }
 
 export interface AdminOverviewApi {
@@ -142,6 +155,7 @@ export interface HighestScoringMarketViewModel {
 export interface DiscoveryCardViewModel {
   id: string;
   title: string;
+  iconUrl: string | null;
   source: string;
   currency: string;
   eventType: string;

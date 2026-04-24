@@ -15,9 +15,10 @@ export function EventDetail() {
   const container = useRef<HTMLDivElement>(null);
 
   const [activeTabId, setActiveTabId] = useState('');
+  const requestedSource = search.source || undefined;
   const eventQuery = useQuery({
-    queryKey: ['event-detail', eventId, search.source],
-    queryFn: async () => marketsApi.getEvent(eventId, undefined, search.source),
+    queryKey: ['event-detail', eventId, requestedSource],
+    queryFn: async () => marketsApi.getEvent(eventId, undefined, requestedSource),
     enabled: !!eventId,
     staleTime: 15_000,
     gcTime: 5 * 60_000,
@@ -29,16 +30,42 @@ export function EventDetail() {
 
   React.useEffect(() => {
     if (!event) return;
-    if (event.highest_scoring_market) {
+    const canonicalSource = event.source?.toLowerCase?.();
+    if (!canonicalSource || canonicalSource === (search.source || '').toLowerCase()) return;
+    navigate({
+      to: '/app/events/$eventId',
+      params: { eventId },
+      search: { source: canonicalSource },
+      replace: true,
+    });
+  }, [event, eventId, navigate, search.source]);
+
+  React.useEffect(() => {
+    if (!event) return;
+    if (activeTabId && event.markets.some((market) => market.market_id === activeTabId)) {
+      return;
+    }
+    if (event.highest_scoring_market && event.markets.some((market) => market.market_id === event.highest_scoring_market?.market_id)) {
       setActiveTabId(event.highest_scoring_market.market_id);
       return;
     }
     if (event.markets.length > 0) {
       setActiveTabId(event.markets[0].market_id);
     }
-  }, [event]);
+  }, [activeTabId, event]);
 
   const selectedOutcome = event?.markets.find((market) => market.market_id === activeTabId) || event?.markets[0];
+  const eventLeader = event?.highest_scoring_market || null;
+  const selectedMarketFlow = (selectedOutcome?.buy_notional || 0) + (selectedOutcome?.sell_notional || 0);
+  const hasObservedFlow =
+    (selectedOutcome?.buy_notional || 0) > 0 || (selectedOutcome?.sell_notional || 0) > 0;
+  const marketVolumeProxy = event?.source === 'POLYMARKET' ? (selectedOutcome?.market_total_orders || 0) : 0;
+  const displaySelectedFlow = hasObservedFlow ? selectedMarketFlow : marketVolumeProxy;
+  const signalNotes = React.useMemo(() => {
+    const notes = selectedOutcome?.signal.notes || [];
+    const deduped = Array.from(new Set(notes));
+    return deduped;
+  }, [selectedOutcome?.signal.notes]);
 
   useLayoutEffect(() => {
     if (!event || !selectedOutcome) return;
@@ -117,6 +144,35 @@ export function EventDetail() {
         </div>
       </div>
 
+      {eventLeader && (
+        <div className="rounded-xl border border-border bg-card p-4 sm:p-5">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="min-w-0">
+              <div className="font-mono text-[10px] uppercase tracking-[0.24em] text-text-muted">Overall Event Leader</div>
+              <div className="mt-2 break-words font-body text-base leading-7 text-text-primary sm:text-lg">
+                {eventLeader.market_title}
+              </div>
+              <div className="mt-2 font-mono text-[11px] text-text-secondary">
+                The overall event heat is led by score, not by order count alone.
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className={`rounded border px-3 py-1 font-mono text-xs font-bold shadow-sm ${getScoreColor(eventLeader.signal.score)}`}>
+                Leader Score {eventLeader.signal.score}
+              </span>
+              {selectedOutcome && selectedOutcome.market_id !== eventLeader.market_id && (
+                <button
+                  onClick={() => setActiveTabId(eventLeader.market_id)}
+                  className="rounded border border-prism-blue/30 bg-navy px-3 py-1 font-mono text-[11px] text-prism-cyan transition-colors hover:border-prism-blue hover:text-text-primary"
+                >
+                  View leader
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="relative mt-2 overflow-hidden rounded-2xl border border-prism-blue/25 bg-navy-mid p-6">
         <div className="absolute top-0 bottom-0 left-0 w-[3px] bg-gradient-to-b from-prism-violet to-prism-cyan" />
         <div className="mb-3 flex items-center justify-between">
@@ -131,19 +187,21 @@ export function EventDetail() {
       </div>
 
       <div className="mt-4 border-b border-border/50">
-        <div className="hide-scrollbar flex gap-2 overflow-x-auto">
+        <div className="hide-scrollbar flex gap-2 overflow-x-auto pb-1">
           {event.markets.map((outcome) => (
             <button
               key={outcome.market_id}
               onClick={() => setActiveTabId(outcome.market_id)}
-              className={`flex min-w-[120px] flex-col items-center gap-1 whitespace-nowrap rounded-t-lg border-b-2 px-4 py-3 font-mono text-sm transition-all ${
+              className={`flex min-w-[180px] max-w-[240px] shrink-0 flex-col items-start gap-2 rounded-t-lg border-b-2 px-3 py-3 text-left font-mono text-sm transition-all sm:min-w-[220px] sm:px-4 ${
                 activeTabId === outcome.market_id
                   ? 'border-prism-blue bg-navy-mid/50 text-text-primary'
                   : 'border-transparent text-text-muted hover:bg-navy-mid/30 hover:text-text-secondary'
               }`}
             >
-              <span>{outcome.market_title}</span>
-              <span className={`rounded-full px-1.5 text-[10px] ${getScoreColor(outcome.signal.score)}`}>
+              <span className="w-full break-words whitespace-normal text-xs leading-relaxed sm:text-sm">
+                {outcome.market_title}
+              </span>
+              <span className={`rounded-full px-2 py-1 text-[10px] ${getScoreColor(outcome.signal.score)}`}>
                 Score {outcome.signal.score}
               </span>
             </button>
@@ -174,35 +232,58 @@ export function EventDetail() {
             </div>
           </div>
 
-          <div className="md:col-span-2 flex flex-col justify-center rounded-xl border border-border bg-card p-6">
+          <div className="md:col-span-2 flex flex-col justify-center rounded-xl border border-border bg-card p-5 sm:p-6">
             <div className="mb-6 flex items-center gap-2">
               <Activity size={16} className="text-prism-blue" />
               <h3 className="font-mono text-xs uppercase tracking-wide text-text-muted">Live Microstructure</h3>
+              <span className="truncate font-mono text-[10px] text-text-dim">
+                / {selectedOutcome.market_title}
+              </span>
             </div>
-            <div className="grid grid-cols-3 gap-4 divide-x divide-border">
-              <div className="flex flex-col items-center justify-center px-2">
-                <span className="mb-1 font-mono text-xl font-bold text-text-primary">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4 xl:divide-x xl:divide-border xl:gap-0">
+              <div className="flex min-w-0 flex-col items-center justify-center border-b border-border/60 px-2 pb-4 text-center sm:border-b-0 sm:px-4 sm:pb-0">
+                <span className="mb-1 break-words text-center font-mono text-2xl font-bold leading-tight text-text-primary sm:text-xl lg:text-2xl">
                   {formatCurrencyCompact(event.currency, selectedOutcome.event_liquidity)}
                 </span>
-                <span className="flex items-center gap-1 font-mono text-[10px] uppercase text-text-muted">
-                  <Droplets size={10} /> Liquidity
+                <span className="flex flex-wrap items-center justify-center gap-1 text-center font-mono text-[10px] uppercase text-text-muted">
+                  <Droplets size={10} /> Event Pool
                 </span>
               </div>
-              <div className="flex flex-col items-center justify-center px-2">
-                <span className="mb-1 font-mono text-xl font-bold text-text-primary">
+              <div className="flex min-w-0 flex-col items-center justify-center border-b border-border/60 px-2 pb-4 text-center sm:border-b-0 sm:px-4 sm:pb-0">
+                <span className="mb-1 break-words text-center font-mono text-2xl font-bold leading-tight text-text-primary sm:text-xl lg:text-2xl">
+                  {displaySelectedFlow > 0 ? formatCurrencyCompact(event.currency, displaySelectedFlow) : '—'}
+                </span>
+                <span className="flex flex-wrap items-center justify-center gap-1 text-center font-mono text-[10px] uppercase text-text-muted">
+                  <Activity size={10} /> Selected Flow
+                </span>
+              </div>
+              <div className="flex min-w-0 flex-col items-center justify-center border-b border-border/60 px-2 pb-4 text-center xl:border-b-0 xl:px-4 xl:pb-0">
+                <span className="mb-1 break-words text-center font-mono text-2xl font-bold leading-tight text-text-primary sm:text-xl lg:text-2xl">
                   {selectedOutcome.market_total_orders?.toLocaleString() || 0}
                 </span>
-                <span className="flex items-center gap-1 font-mono text-[10px] uppercase text-text-muted">
-                  <Users size={10} /> Orders
+                <span className="flex flex-wrap items-center justify-center gap-1 text-center font-mono text-[10px] uppercase text-text-muted">
+                  <Users size={10} /> Market Orders
                 </span>
               </div>
-              <div className="flex flex-col items-center justify-center px-2">
-                <span className="mb-1 font-mono text-xl font-bold text-text-primary">{selectedOutcome.signal.score}</span>
-                <span className="flex items-center gap-1 font-mono text-[10px] uppercase text-text-muted">
+              <div className="flex min-w-0 flex-col items-center justify-center px-2 text-center xl:px-4">
+                <span className="mb-1 break-words text-center font-mono text-2xl font-bold leading-tight text-text-primary sm:text-xl lg:text-2xl">
+                  {selectedOutcome.signal.score}
+                </span>
+                <span className="flex flex-wrap items-center justify-center gap-1 text-center font-mono text-[10px] uppercase text-text-muted">
                   <Zap size={10} /> Signal
                 </span>
               </div>
             </div>
+            {hasObservedFlow ? (
+              <div className="mt-4 grid grid-cols-1 gap-2 font-mono text-[10px] uppercase tracking-wide text-text-dim sm:grid-cols-2">
+                <div>Buy flow: {formatCurrencyCompact(event.currency, selectedOutcome.buy_notional || 0)}</div>
+                <div>Sell flow: {formatCurrencyCompact(event.currency, selectedOutcome.sell_notional || 0)}</div>
+              </div>
+            ) : event.source === 'POLYMARKET' && marketVolumeProxy > 0 ? (
+              <div className="mt-2 font-mono text-[10px] text-text-dim">
+                Using Polymarket market volume as the selected-flow proxy until trade-side flow accumulates.
+              </div>
+            ) : null}
           </div>
         </div>
 
@@ -236,21 +317,21 @@ export function EventDetail() {
             </div>
           </div>
 
-          <div className="rounded-xl border border-border bg-navy-mid p-6">
+          <div className="rounded-xl border border-border bg-navy-mid p-5 sm:p-6">
             <div className="mb-4 flex items-center gap-2">
               <Activity size={16} className="text-prism-blue" />
               <h3 className="font-mono text-xs uppercase tracking-wide text-text-muted">Signal Notes</h3>
             </div>
-            {selectedOutcome.signal.notes && selectedOutcome.signal.notes.length > 0 ? (
+            {signalNotes.length > 0 ? (
               <div className="flex flex-col gap-2">
-                {selectedOutcome.signal.notes.map((note, index) => (
-                  <p key={index} className="font-body text-sm leading-relaxed text-text-secondary">
+                {signalNotes.map((note, index) => (
+                  <p key={index} className="break-words font-body text-sm leading-8 text-text-primary/85">
                     {note}
                   </p>
                 ))}
               </div>
             ) : (
-              <p className="font-body text-sm leading-relaxed text-text-secondary">
+              <p className="break-words font-body text-sm leading-8 text-text-primary/85">
                 No additional signal notes yet. This market is still using the current live state and scoring snapshot.
               </p>
             )}

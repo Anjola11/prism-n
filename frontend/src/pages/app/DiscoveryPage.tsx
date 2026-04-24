@@ -21,7 +21,7 @@ export function DiscoveryPage() {
     },
     staleTime: 30_000,
     gcTime: 5 * 60_000,
-    refetchInterval: 45_000,
+    refetchInterval: 30_000,
     placeholderData: (previousData) => previousData,
     retry: (failureCount, error) => {
       if ((error as any)?.response?.status === 503 && failureCount < 5) return true;

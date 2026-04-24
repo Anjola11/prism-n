@@ -92,7 +92,7 @@ export const analysisRoute = createRoute({
   path: '/events/$eventId',
   component: EventDetail,
   validateSearch: (search: Record<string, unknown>) => ({
-    source: (search.source as string) || 'bayse',
+    source: (search.source as string) || '',
   }),
 });
 

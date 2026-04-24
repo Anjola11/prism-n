@@ -22,6 +22,7 @@ export function TrackerPage() {
     gcTime: 5 * 60_000,
     refetchInterval: 30_000,
     placeholderData: (previousData) => previousData,
+    retry: 2,
   });
 
   const events: DiscoveryCardViewModel[] = trackerQuery.data || [];
@@ -95,7 +96,7 @@ export function TrackerPage() {
         </div>
       </div>
 
-      {trackerQuery.isError && !trackerQuery.isLoading && (
+      {trackerQuery.isError && !trackerQuery.isLoading && events.length === 0 && (
         <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 p-4 text-sm text-amber-500">
           Failed to load tracked events.
         </div>
