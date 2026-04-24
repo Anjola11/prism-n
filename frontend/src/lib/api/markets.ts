@@ -1,5 +1,5 @@
 import { api } from './client';
-import { DiscoveryEventApi } from './types';
+import type { DiscoveryEventApi } from './types';
 
 export const marketsApi = {
   getEvents: async (): Promise<DiscoveryEventApi[]> => {

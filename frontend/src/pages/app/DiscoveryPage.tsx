@@ -2,7 +2,7 @@ import React, { useLayoutEffect, useRef, useState, useEffect } from 'react';
 import { useNavigate } from '@tanstack/react-router';
 import { marketsApi } from '../../lib/api/markets';
 import { mapDiscoveryEvent } from '../../lib/api/adapters';
-import { DiscoveryCardViewModel } from '../../lib/api/types';
+import type { DiscoveryCardViewModel } from '../../lib/api/types';
 import { SignalCard } from '../../components/ui/SignalCard';
 import gsap from 'gsap';
 import { Filter } from 'lucide-react';

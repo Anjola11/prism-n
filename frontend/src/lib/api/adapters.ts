@@ -1,4 +1,4 @@
-import { DiscoveryEventApi, DiscoveryCardViewModel } from './types';
+import type { DiscoveryEventApi, DiscoveryCardViewModel } from './types';
 
 export function mapDiscoveryEvent(apiEvent: DiscoveryEventApi): DiscoveryCardViewModel {
   return {
