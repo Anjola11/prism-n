@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 from collections import defaultdict
 from datetime import datetime, timezone
 from uuid import UUID
@@ -13,6 +13,7 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from src.markets.baselines import BaselineServices
+from src.markets.ai_insights import AIInsightServices
 from src.markets.live_state import (
     BayseSubscriptionPlan,
     LiveStateServices,
@@ -51,6 +52,9 @@ class MarketServices:
     DISCOVERY_LISTINGS_CACHE_TTL = 60
     TRACKER_CACHE_TTL = 45
     EVENT_DETAIL_CACHE_TTL = 15
+    AI_INSIGHT_CACHE_TTL = 1800
+    AI_INSIGHT_LOCK_TTL = 45
+    AI_INSIGHT_PLACEHOLDER = "AI insight is warming up."
     DISCOVERY_FEED_CACHE_TTL = 300
     DISCOVERY_FEED_BUILD_LOCK_TTL = 30
 
@@ -63,6 +67,7 @@ class MarketServices:
         live_state: LiveStateServices | None = None,
         baseline_services: BaselineServices | None = None,
         scoring_services: ScoringServices | None = None,
+        ai_insight_services: AIInsightServices | None = None,
     ):
         self.bayse = bayse
         self.polymarket = polymarket
@@ -71,6 +76,7 @@ class MarketServices:
         self.live_state = live_state
         self.baseline_services = baseline_services
         self.scoring_services = scoring_services
+        self.ai_insight_services = ai_insight_services
 
     def _discovery_listings_cache_id(self, *, currency: Currency) -> str:
         return f"discovery-listings:{currency.value}"
@@ -80,6 +86,92 @@ class MarketServices:
 
     def _event_detail_cache_id(self, *, event_id: str, currency: Currency) -> str:
         return f"event-detail:{event_id}:{currency.value}"
+
+    def _event_ai_insight_cache_id(self, *, event_id: str, currency: Currency) -> str:
+        return f"event-ai-insight:v2:{event_id}:{currency.value}"
+
+    def _is_missing_ai_insight(self, ai_insight: str | None) -> bool:
+        if not ai_insight or not ai_insight.strip():
+            return True
+        normalized = ai_insight.strip().lower()
+        return normalized in {
+            "insight unavailable",
+            "ai insight unavailable",
+            self.AI_INSIGHT_PLACEHOLDER.lower(),
+        }
+
+    def _build_card_ai_insight(
+        self,
+        *,
+        event_title: str,
+        data_mode: str,
+        highest_scoring_market: HighestScoringMarketRead | None,
+    ) -> str:
+        if not highest_scoring_market:
+            if data_mode == "tracked_live":
+                return (
+                    f"Prism is monitoring '{event_title}' live, but the strongest outcome has not separated clearly yet. "
+                    "Use the score and recent move together to see when the market starts showing real conviction."
+                )
+            return (
+                f"'{event_title}' is still shown as an early snapshot. Open the event to see more detail, "
+                "or track it so Prism can build a stronger live read."
+            )
+
+        leader = highest_scoring_market
+        probability_text = (
+            f"{round((leader.current_probability or 0.0) * 100)}%"
+            if leader.current_probability is not None
+            else "an early level"
+        )
+        delta_points = round(leader.probability_delta * 100, 2)
+        if delta_points > 0:
+            move_text = f"up {delta_points:.2f} points"
+        elif delta_points < 0:
+            move_text = f"down {abs(delta_points):.2f} points"
+        else:
+            move_text = "holding roughly steady"
+
+        score = leader.signal.score
+        if score >= 70:
+            conviction_text = "a strong read with meaningful conviction"
+        elif score >= 40:
+            conviction_text = "some structure, but not a fully settled move yet"
+        else:
+            conviction_text = "a weak read that still needs confirmation"
+
+        note = None
+        if leader.signal.notes:
+            for raw_note in leader.signal.notes:
+                if isinstance(raw_note, str) and raw_note.strip():
+                    note = raw_note.strip().rstrip(".")
+                    break
+
+        if data_mode == "tracked_live":
+            return (
+                f"Right now, Prism sees the clearest pressure in '{leader.market_title}', with the market leaning around {probability_text}. "
+                f"The move is {move_text} and the current score suggests {conviction_text}"
+                + (f" because {note.lower()}." if note else ".")
+            )[:400]
+
+        return (
+            f"At first glance, '{leader.market_title}' is the outcome Prism would watch first, with the market sitting near {probability_text}. "
+            f"This is still a lighter snapshot, so treat it as an early clue rather than a finished live call"
+            + (f" - especially since {note.lower()}." if note else ".")
+        )[:400]
+
+    def _with_card_ai_insight(self, read_model):
+        if not self._is_missing_ai_insight(getattr(read_model, "ai_insight", None)):
+            return read_model
+        return read_model.model_copy(
+            update={
+                "ai_insight": self._build_card_ai_insight(
+                    event_title=getattr(read_model, "event_title", ""),
+                    data_mode=getattr(read_model, "data_mode", "lite_snapshot"),
+                    highest_scoring_market=getattr(read_model, "highest_scoring_market", None),
+                )
+            }
+        )
 
     async def _refresh_subscription_plan_for_source(
         self,
@@ -857,6 +949,30 @@ class MarketServices:
             ttl_seconds=self.EVENT_DETAIL_CACHE_TTL,
         )
 
+    async def _get_cached_event_ai_insight(self, *, event_id: str, currency: Currency) -> str | None:
+        if not self.live_state:
+            return None
+        payload = await self.live_state.get_read_model(
+            namespace="event-ai-insight",
+            identifier=self._event_ai_insight_cache_id(event_id=event_id, currency=currency),
+        )
+        if not payload or not isinstance(payload, dict):
+            return None
+        insight = payload.get("ai_insight")
+        if not isinstance(insight, str) or not insight.strip():
+            return None
+        return insight
+
+    async def _set_cached_event_ai_insight(self, *, event_id: str, currency: Currency, ai_insight: str) -> None:
+        if not self.live_state:
+            return
+        await self.live_state.set_read_model(
+            namespace="event-ai-insight",
+            identifier=self._event_ai_insight_cache_id(event_id=event_id, currency=currency),
+            payload={"ai_insight": ai_insight},
+            ttl_seconds=self.AI_INSIGHT_CACHE_TTL,
+        )
+
     async def _invalidate_user_read_models(
         self,
         *,
@@ -873,6 +989,10 @@ class MarketServices:
         await self.live_state.delete_read_model(
             namespace="event-detail",
             identifier=self._event_detail_cache_id(event_id=event_id, currency=currency),
+        )
+        await self.live_state.delete_read_model(
+            namespace="event-ai-insight",
+            identifier=self._event_ai_insight_cache_id(event_id=event_id, currency=currency),
         )
 
     async def _invalidate_shared_read_models(
@@ -891,6 +1011,10 @@ class MarketServices:
             namespace="event-detail",
             identifier=self._event_detail_cache_id(event_id=event_id, currency=currency),
         )
+        await self.live_state.delete_read_model(
+            namespace="event-ai-insight",
+            identifier=self._event_ai_insight_cache_id(event_id=event_id, currency=currency),
+        )
 
     def _clone_event_detail_with_tracking(
         self,
@@ -901,6 +1025,59 @@ class MarketServices:
         payload = cached_detail.model_dump()
         payload["tracking_enabled"] = tracking_enabled
         return EventDetailRead.model_validate(payload)
+
+    async def _generate_and_cache_ai_insight(self, event_detail: EventDetailRead) -> None:
+        if not self.ai_insight_services or not self.ai_insight_services.is_enabled:
+            return
+        ai_insight = await self.ai_insight_services.generate_event_insight(event_detail)
+        if not ai_insight:
+            logger.info("AI insight generation returned no content for event %s", event_detail.event_id)
+            return
+        await self._set_cached_event_ai_insight(
+            event_id=event_detail.event_id,
+            currency=event_detail.currency,
+            ai_insight=ai_insight,
+        )
+        logger.info("Cached AI insight for event %s", event_detail.event_id)
+
+    def _build_fallback_ai_insight(self, event_detail: EventDetailRead) -> str:
+        leader = event_detail.highest_scoring_market
+        summary = self._build_card_ai_insight(
+            event_title=event_detail.event_title,
+            data_mode=event_detail.data_mode,
+            highest_scoring_market=leader,
+        )
+        if not leader:
+            return summary
+        return (
+            f"{summary} In plain terms: this is the outcome currently attracting the most meaningful attention, "
+            "but you should read it as direction and conviction building, not as a guarantee."
+        )[:400]
+
+    async def _attach_ai_insight(self, event_detail: EventDetailRead) -> EventDetailRead:
+        if not self.ai_insight_services or not self.ai_insight_services.is_enabled:
+            return event_detail.model_copy(update={"ai_insight": self._build_fallback_ai_insight(event_detail)})
+
+        cached_ai_insight = await self._get_cached_event_ai_insight(
+            event_id=event_detail.event_id,
+            currency=event_detail.currency,
+        )
+        if cached_ai_insight:
+            return event_detail.model_copy(update={"ai_insight": cached_ai_insight})
+
+        if self.live_state:
+            lock_acquired = await self.live_state.acquire_coordination_lock(
+                namespace="event-ai-insight-generate",
+                identifier=self._event_ai_insight_cache_id(
+                    event_id=event_detail.event_id,
+                    currency=event_detail.currency,
+                ),
+                ttl_seconds=self.AI_INSIGHT_LOCK_TTL,
+            )
+            if lock_acquired:
+                asyncio.create_task(self._generate_and_cache_ai_insight(event_detail))
+
+        return event_detail.model_copy(update={"ai_insight": self._build_fallback_ai_insight(event_detail)})
 
     def normalize_event_to_tracked_markets(
         self,
@@ -1083,7 +1260,8 @@ class MarketServices:
             currency=effective_currency,
             event_liquidity=live_total_liquidity if live_total_liquidity is not None else (metric.total_liquidity if metric else None),
         )
-        return TrackedEventRead(
+        highest_scoring_market = self._build_highest_scoring_market(grouped_market_reads)
+        return self._with_card_ai_insight(TrackedEventRead(
             event_id=first_market.event_id,
             event_title=first_market.event_title,
             event_slug=first_market.event_slug,
@@ -1102,8 +1280,8 @@ class MarketServices:
             data_mode="tracked_live",
             last_updated=live_last_updated,
             ai_insight="Insight unavailable",
-            highest_scoring_market=self._build_highest_scoring_market(grouped_market_reads),
-        )
+            highest_scoring_market=highest_scoring_market,
+        ))
 
     async def _build_discovery_read_for_tracked_event(
         self,
@@ -1133,7 +1311,8 @@ class MarketServices:
             )
             for market in markets
         ]
-        return DiscoveryEventRead(
+        highest_scoring_market = self._build_highest_scoring_market(grouped_markets)
+        return self._with_card_ai_insight(DiscoveryEventRead(
             event_id=first_market.event_id,
             event_title=first_market.event_title,
             event_slug=first_market.event_slug,
@@ -1152,8 +1331,8 @@ class MarketServices:
             data_mode="tracked_live",
             last_updated=live_last_updated,
             ai_insight="Insight unavailable",
-            highest_scoring_market=self._build_highest_scoring_market(grouped_markets),
-        )
+            highest_scoring_market=highest_scoring_market,
+        ))
 
     async def _get_user_tracking_status(
         self,
@@ -1641,7 +1820,7 @@ class MarketServices:
         cached_response = await self._get_cached_tracker_response(user_id=user_id, currency=currency)
         if cached_response is not None:
             logger.info("Serving tracker feed from Redis cache for user %s in %s", user_id, currency.value)
-            return cached_response
+            return [self._with_card_ai_insight(item) for item in cached_response]
 
         statement = select(UserTrackedEvent).where(
             UserTrackedEvent.user_id == user_id,
@@ -1709,6 +1888,7 @@ class MarketServices:
             )
 
         response = await asyncio.gather(*build_tasks) if build_tasks else []
+        response = [self._with_card_ai_insight(item) for item in response]
 
         logger.info("Listed %s tracked events for user %s", len(response), user_id)
         await self._set_cached_tracker_response(user_id=user_id, currency=currency, response=response)
@@ -1756,7 +1936,7 @@ class MarketServices:
             )
             if cached and isinstance(cached, list):
                 logger.info("Serving system tracker from cache for %s", currency.value)
-                return [TrackedEventRead.model_validate(item) for item in cached]
+                return [self._with_card_ai_insight(TrackedEventRead.model_validate(item)) for item in cached]
 
         statement = select(TrackedMarket).where(
             TrackedMarket.is_system_tracked == True,
@@ -1806,6 +1986,7 @@ class MarketServices:
             )
 
         response = await asyncio.gather(*build_tasks) if build_tasks else []
+        response = [self._with_card_ai_insight(item) for item in response]
 
         response.sort(key=lambda item: item.event_title)
 
@@ -1905,10 +2086,11 @@ class MarketServices:
                     event_id=event_id,
                 )
                 logger.info("Serving authoritative event detail for %s in %s from Redis cache", event_id, currency.value)
-                return self._clone_event_detail_with_tracking(
+                response = self._clone_event_detail_with_tracking(
                     cached_detail=authoritative_cached_detail,
                     tracking_enabled=tracking_enabled,
                 )
+                return await self._attach_ai_insight(response)
 
         if cached_detail is not None and cached_detail.source == authoritative_source:
             tracking_enabled = await self._get_user_tracking_status(
@@ -1917,10 +2099,11 @@ class MarketServices:
                 event_id=event_id,
             )
             logger.info("Serving event detail for %s in %s from Redis cache", event_id, currency.value)
-            return self._clone_event_detail_with_tracking(
+            response = self._clone_event_detail_with_tracking(
                 cached_detail=cached_detail,
                 tracking_enabled=tracking_enabled,
             )
+            return await self._attach_ai_insight(response)
 
         markets = [
             market
@@ -1974,7 +2157,7 @@ class MarketServices:
                 markets=grouped_markets,
             )
             await self._set_cached_event_detail(event_detail=response)
-            return response
+            return await self._attach_ai_insight(response)
 
         tracking_enabled = await self._get_user_tracking_status(
             session=session,
@@ -2001,7 +2184,7 @@ class MarketServices:
             tracking_enabled=tracking_enabled,
         )
         await self._set_cached_event_detail(event_detail=response)
-        return response
+        return await self._attach_ai_insight(response)
 
     async def get_discovery_feed_for_user(
         self,
@@ -2124,12 +2307,12 @@ class MarketServices:
             source_value = str(item.get("source") or "")
             upgraded = upgraded_cards.get((event_id, source_value))
             if upgraded is not None:
-                discovery.append(upgraded)
+                discovery.append(self._with_card_ai_insight(upgraded))
                 continue
 
             item["tracking_enabled"] = event_id in tracked_ids
             try:
-                discovery.append(DiscoveryEventRead.model_validate(item))
+                discovery.append(self._with_card_ai_insight(DiscoveryEventRead.model_validate(item)))
             except Exception:
                 logger.warning("Discovery worker card validation failed for %s", item.get("event_id"))
                 continue
@@ -2216,10 +2399,11 @@ class MarketServices:
         for item in paged_cached:
             item["tracking_enabled"] = item.get("event_id") in system_tracked_ids
             try:
-                discovery.append(DiscoveryEventRead.model_validate(item))
+                discovery.append(self._with_card_ai_insight(DiscoveryEventRead.model_validate(item)))
             except Exception:
                 logger.warning("System discovery card validation failed for %s", item.get("event_id"))
                 continue
 
         logger.info("System discovery feed contains %s events", total_count)
         return discovery, total_count
+

@@ -27,6 +27,9 @@ export function EventDetail() {
   });
 
   const event: EventDetailApi | null = eventQuery.data || null;
+  const isTrackedEvent = Boolean(event?.tracking_enabled);
+  const isLiveSynced = Boolean(event && event.data_mode === 'tracked_live' && event.last_updated);
+  const isAnalyzing = Boolean(event) && isTrackedEvent && !isLiveSynced;
 
   React.useEffect(() => {
     if (!event) return;
@@ -139,10 +142,16 @@ export function EventDetail() {
             Total Pool: {formatCurrencyCompact(event.currency, event.total_liquidity)}
           </span>
           <span className="ml-auto font-mono text-xs text-text-muted">
-            Updated {formatRelative(event.last_updated)}
+            {isAnalyzing ? 'Analyzing live state...' : `Updated ${formatRelative(event.last_updated)}`}
           </span>
         </div>
       </div>
+
+      {isAnalyzing && (
+        <div className="rounded-xl border border-prism-blue/25 bg-prism-blue/8 px-4 py-3 font-mono text-[11px] uppercase tracking-[0.18em] text-prism-cyan">
+          Initial snapshot loaded. Waiting for first live sync.
+        </div>
+      )}
 
       {eventLeader && (
         <div className="rounded-xl border border-border bg-card p-4 sm:p-5">
@@ -179,10 +188,10 @@ export function EventDetail() {
           <h2 className="flex items-center gap-2 font-mono text-xs uppercase tracking-wide text-prism-cyan">
             <Sparkles size={14} /> AI Interpretation
           </h2>
-          <span className="font-mono text-[10px] text-text-dim">Placeholder until AI layer is live</span>
+          <span className="font-mono text-[10px] text-text-dim">{isAnalyzing ? 'Building first live read' : 'Live event read'}</span>
         </div>
         <blockquote className="border-l-2 border-prism-blue/40 pl-4 font-body text-[0.9375rem] italic leading-[1.75] text-text-primary">
-          {event.ai_insight || 'Insight unavailable'}
+          {event.ai_insight || 'AI insight unavailable'}
         </blockquote>
       </div>
 
@@ -213,23 +222,32 @@ export function EventDetail() {
         <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
           <div className="flex flex-col items-center justify-center rounded-xl border border-border bg-card p-6 text-center">
             <span className="mb-4 font-mono text-xs uppercase tracking-wider text-text-muted">Current Probability</span>
-            <div className="flex items-baseline gap-2">
-              <span className="flex items-baseline font-mono text-4xl font-bold text-text-primary">
-                {Math.round((selectedOutcome.current_probability || 0) * 100)}<span className="text-2xl">%</span>
-              </span>
-            </div>
-            <div
-              className={`mt-2 font-mono text-xs ${
-                selectedOutcome.probability_delta > 0
-                  ? 'text-emerald-400'
-                  : selectedOutcome.probability_delta < 0
-                    ? 'text-amber-500'
-                    : 'text-slate-400'
-              }`}
-            >
-              ({selectedOutcome.probability_delta > 0 ? '+' : ''}
-              {(selectedOutcome.probability_delta * 100).toFixed(2)} pts move)
-            </div>
+            {isAnalyzing ? (
+              <>
+                <div className="font-mono text-2xl font-bold text-text-primary">Analyzing...</div>
+                <div className="mt-2 font-mono text-xs text-text-muted">Waiting for the first live probability sync.</div>
+              </>
+            ) : (
+              <>
+                <div className="flex items-baseline gap-2">
+                  <span className="flex items-baseline font-mono text-4xl font-bold text-text-primary">
+                    {Math.round((selectedOutcome.current_probability || 0) * 100)}<span className="text-2xl">%</span>
+                  </span>
+                </div>
+                <div
+                  className={`mt-2 font-mono text-xs ${
+                    selectedOutcome.probability_delta > 0
+                      ? 'text-emerald-400'
+                      : selectedOutcome.probability_delta < 0
+                        ? 'text-amber-500'
+                        : 'text-slate-400'
+                  }`}
+                >
+                  ({selectedOutcome.probability_delta > 0 ? '+' : ''}
+                  {(selectedOutcome.probability_delta * 100).toFixed(2)} pts move)
+                </div>
+              </>
+            )}
           </div>
 
           <div className="md:col-span-2 flex flex-col justify-center rounded-xl border border-border bg-card p-5 sm:p-6">

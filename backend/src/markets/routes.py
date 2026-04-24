@@ -48,6 +48,7 @@ def get_market_services(
         live_state=request.app.state.live_state,
         baseline_services=request.app.state.baseline_services,
         scoring_services=request.app.state.scoring_services,
+        ai_insight_services=request.app.state.ai_insight_services,
     )
 
 

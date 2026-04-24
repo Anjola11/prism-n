@@ -56,6 +56,29 @@ export function SignalCard({ event, onTrack, isTracked = false, isTrackPending =
     : 'UNSCORED';
   const isLite = event.dataMode === 'lite_snapshot';
   const isTrackedAwaitingSignal = isTracked && isLite;
+  const fallbackInsight = React.useMemo(() => {
+    if (!topMarket) {
+      return isTrackedAwaitingSignal
+        ? 'Prism is tracking this event live and is still waiting for enough structure to call the move clearly.'
+        : 'This card is still an early snapshot. Open the event for more detail or track it so Prism can build a live read.';
+    }
+
+    const probabilityText =
+      topMarket.currentProbability !== null ? `${Math.round(topMarket.currentProbability * 100)}%` : 'an early level';
+    const note = signal?.notes?.find((entry) => typeof entry === 'string' && entry.trim())?.trim();
+
+    if (isTrackedAwaitingSignal) {
+      return (
+        `Prism is tracking '${topMarket.marketTitle}' live, and the market is currently leaning around ${probabilityText}. ` +
+        (note ? `The first thing standing out is ${note.toLowerCase()}.` : 'The first live read is still settling in.')
+      );
+    }
+
+    return (
+      `At first glance, '${topMarket.marketTitle}' is the outcome Prism would watch first, with the market sitting near ${probabilityText}. ` +
+      (note ? `Early clue: ${note}.` : 'Treat this as an early clue until the event is being tracked live.')
+    );
+  }, [isTrackedAwaitingSignal, signal?.notes, topMarket]);
 
   const handleCardClick = () => {
     navigate({ to: `/app/events/${event.id}`, search: { source: event.source.toLowerCase() } });
@@ -112,7 +135,7 @@ export function SignalCard({ event, onTrack, isTracked = false, isTrackPending =
       <div className="mb-5 mt-auto rounded-lg border border-border/50 bg-navy p-3">
         <p className="flex gap-2 font-body text-xs text-text-secondary line-clamp-2">
           <span className="flex-shrink-0 text-prism-cyan">{'>'}</span>
-          {event.aiInsight || 'Insight unavailable'}
+          {event.aiInsight || fallbackInsight}
         </p>
       </div>
 

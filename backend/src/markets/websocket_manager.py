@@ -612,6 +612,14 @@ class BayseWebSocketManager:
                 score_result=score_result,
             )
         )
+        if self._should_refresh_event_ai_insight(
+            previous_signal=previous_signal,
+            score_result=score_result,
+        ):
+            await self._invalidate_event_ai_insight(
+                event_id=market_state.event_id,
+                currency=currency,
+            )
         snapshot_reason = self._determine_snapshot_reason(
             previous_signal=previous_signal,
             market_state=market_state,
@@ -782,6 +790,27 @@ class BayseWebSocketManager:
         if market_state.has_recent_reversal and score_result.score >= 50:
             return "reversal_signal"
         return None
+
+    def _should_refresh_event_ai_insight(self, *, previous_signal, score_result) -> bool:
+        if previous_signal is None:
+            return score_result.score >= 40
+        if previous_signal.classification != score_result.classification:
+            return True
+        if abs(previous_signal.score - score_result.score) >= 12:
+            return True
+        previous_notes = tuple(previous_signal.notes or [])
+        current_notes = tuple(score_result.notes or [])
+        return previous_notes != current_notes
+
+    async def _invalidate_event_ai_insight(self, *, event_id: str, currency: Currency) -> None:
+        await self.live_state.delete_read_model(
+            namespace="event-ai-insight",
+            identifier=f"event-ai-insight:v2:{event_id}:{currency.value}",
+        )
+        await self.live_state.delete_read_model(
+            namespace="event-detail",
+            identifier=f"event-detail:{event_id}:{currency.value}",
+        )
 
     def get_status(self) -> dict[str, Any]:
         return {

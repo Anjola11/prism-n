@@ -20,5 +20,6 @@ dependencies = [
     "jinja2>=3.1.6",
     "brevo-python>=4.0.9",
     "websockets>=16.0",
+    "groq>=1.2.0",
 ]
 

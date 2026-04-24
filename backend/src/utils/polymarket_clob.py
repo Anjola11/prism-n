@@ -229,8 +229,7 @@ class PolymarketCLOBServices:
             return best_bid
         if best_ask is not None:
             return best_ask
-        last_trade = book.get("last_trade_price")
-        return float(last_trade) if last_trade is not None else None
+        return self._to_float(book.get("last_trade_price"))
 
     def spread_bps_from_book(self, book: dict | None) -> float | None:
         if not book:

@@ -247,10 +247,10 @@ export function ExplanationPage() {
              <div className="bg-gradient-to-br from-navy-mid to-navy border border-border p-6 rounded-xl shadow-card flex flex-col lg:col-span-3">
                 <div className="flex items-center gap-2 mb-4">
                   <BrainCircuit className="text-prism-cyan" size={24} />
-                  <h3 className="font-heading font-semibold text-text-primary">Gemini AI Event Baseline</h3>
+                  <h3 className="font-heading font-semibold text-text-primary">AI Event Baseline</h3>
                 </div>
                 <p className="font-body text-sm text-text-secondary leading-relaxed">
-                  Before diving into numbers, the page is topped with a live-generated AI narrative. Gemini assesses all competing outcomes simultaneously (e.g., "Money is exiting France and pouring into Argentina under heavy institutional volume") to frame your bias instantly.
+                  Before diving into numbers, the page is topped with a live-generated AI narrative. The AI assesses all competing outcomes simultaneously (e.g., "Money is exiting France and pouring into Argentina under heavy institutional volume") to frame your bias instantly.
                 </p>
              </div>
 

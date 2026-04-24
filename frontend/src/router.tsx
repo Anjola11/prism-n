@@ -1,7 +1,6 @@
 import React from 'react';
 import { createRouter, createRoute, createRootRoute, Outlet } from '@tanstack/react-router';
 import { LandingPage } from './pages/LandingPage';
-import { ExplanationPage } from './pages/ExplanationPage';
 import { SignupPage } from './pages/auth/SignupPage';
 import { LoginPage } from './pages/auth/LoginPage';
 import { OTPPage } from './pages/auth/OTPPage';
@@ -27,12 +26,6 @@ export const landingRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/',
   component: LandingPage,
-});
-
-export const explanationRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: '/how-it-works',
-  component: ExplanationPage,
 });
 
 export const signupRoute = createRoute({
@@ -143,7 +136,6 @@ const adminRouteWithChildren = adminRoute.addChildren([
 
 const routeTree = rootRoute.addChildren([
   landingRoute,
-  explanationRoute,
   signupRoute,
   loginRoute,
   otpRoute,

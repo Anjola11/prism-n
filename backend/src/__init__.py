@@ -26,6 +26,7 @@ from src.markets.signal_snapshots import SignalSnapshotServices
 from src.markets.polymarket_websocket_manager import PolymarketWebSocketManager
 from src.markets.websocket_manager import BayseWebSocketManager
 from src.markets.discovery_worker import DiscoveryWorker
+from src.markets.ai_insights import AIInsightServices
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -47,6 +48,7 @@ async def lifespan(app: FastAPI):
     )
     app.state.scoring_services = ScoringServices()
     app.state.signal_snapshot_services = SignalSnapshotServices()
+    app.state.ai_insight_services = AIInsightServices()
     app.state.bayse_ws_manager = BayseWebSocketManager(
         bayse=app.state.bayse,
         live_state=app.state.live_state,
