@@ -81,6 +81,16 @@ class SubscriptionLiveState(BaseModel):
     last_subscribed_at: str = Field(default_factory=utc_now_iso)
 
 
+class AssetMappingLiveState(BaseModel):
+    source: MarketSource
+    asset_id: str
+    event_id: str
+    market_id: str
+    currency: Currency
+    outcome_side: str
+    last_bound_at: str = Field(default_factory=utc_now_iso)
+
+
 class LiveStateServices:
     def __init__(self, redis=redis_client):
         self.redis = redis
@@ -108,6 +118,46 @@ class LiveStateServices:
         if market_id:
             return f"prism:subscription:{source.value}:{channel}:{event_id}:{market_id}"
         return f"prism:subscription:{source.value}:{channel}:{event_id}"
+
+    def read_model_key(self, *, namespace: str, identifier: str) -> str:
+        return f"prism:readmodel:{namespace}:{identifier}"
+
+    def asset_mapping_key(self, *, source: MarketSource, asset_id: str) -> str:
+        return f"prism:assetmap:{source.value}:{asset_id}"
+
+    async def set_read_model(self, *, namespace: str, identifier: str, payload, ttl_seconds: int | None = None) -> None:
+        key = self.read_model_key(namespace=namespace, identifier=identifier)
+        serialized = json.dumps(payload)
+        if ttl_seconds:
+            await self.redis.set(key, serialized, ex=ttl_seconds)
+            return
+        await self.redis.set(key, serialized)
+
+    async def get_read_model(self, *, namespace: str, identifier: str):
+        payload = await self.redis.get(self.read_model_key(namespace=namespace, identifier=identifier))
+        if not payload:
+            return None
+        return json.loads(payload)
+
+    async def delete_read_model(self, *, namespace: str, identifier: str) -> None:
+        await self.redis.delete(self.read_model_key(namespace=namespace, identifier=identifier))
+
+    async def set_asset_mapping(self, state: AssetMappingLiveState) -> None:
+        await self.redis.set(
+            self.asset_mapping_key(source=state.source, asset_id=state.asset_id),
+            state.model_dump_json(),
+        )
+
+    async def get_asset_mapping(
+        self,
+        *,
+        source: MarketSource,
+        asset_id: str,
+    ) -> AssetMappingLiveState | None:
+        payload = await self.redis.get(self.asset_mapping_key(source=source, asset_id=asset_id))
+        if not payload:
+            return None
+        return AssetMappingLiveState.model_validate_json(payload)
 
     async def set_event_state(self, state: EventLiveState) -> None:
         await self.redis.set(
@@ -311,6 +361,27 @@ class LiveStateServices:
             event_total_orders=tracked_market.event_total_orders,
         )
         await self.set_market_state(state)
+        if tracked_market.source == MarketSource.POLYMARKET:
+            await self.set_asset_mapping(
+                AssetMappingLiveState(
+                    source=tracked_market.source,
+                    asset_id=tracked_market.yes_outcome_id,
+                    event_id=tracked_market.event_id,
+                    market_id=tracked_market.market_id,
+                    currency=currency,
+                    outcome_side="YES",
+                )
+            )
+            await self.set_asset_mapping(
+                AssetMappingLiveState(
+                    source=tracked_market.source,
+                    asset_id=tracked_market.no_outcome_id,
+                    event_id=tracked_market.event_id,
+                    market_id=tracked_market.market_id,
+                    currency=currency,
+                    outcome_side="NO",
+                )
+            )
         return state
 
     async def warm_event_state_from_tracking(

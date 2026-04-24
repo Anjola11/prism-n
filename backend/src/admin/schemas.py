@@ -34,6 +34,7 @@ class AdminOverviewRead(BaseModel):
 class AdminSystemStatusRead(BaseModel):
     redis_ok: bool
     websocket: dict
+    background_jobs: dict | None = None
 
 
 class AdminAnalyticsRead(BaseModel):

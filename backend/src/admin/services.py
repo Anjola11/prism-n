@@ -1,4 +1,4 @@
-from fastapi import HTTPException, Response, status
+from fastapi import HTTPException, Request, Response, status
 from sqlalchemy import func
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -15,7 +15,7 @@ from src.admin.models import AdminActionLog
 from src.auth.models import User, UserRole
 from src.auth.services import AuthServices
 from src.db.redis import redis_client
-from src.markets.models import Currency, MarketSignalSnapshot, TrackedMarket, UserTrackedEvent
+from src.markets.models import Currency, MarketSignalSnapshot, MarketSource, TrackedMarket, UserTrackedEvent
 from src.markets.services import MarketServices
 from src.utils.logger import logger
 
@@ -31,11 +31,13 @@ class AdminServices:
         login_input: AdminLoginInput,
         session: AsyncSession,
         response: Response,
+        request: Request,
     ) -> dict:
         return await self.auth_services.login_user(
             login_input,
             session,
             response,
+            request=request,
             required_role=UserRole.ADMIN.value,
         )
 
@@ -45,9 +47,13 @@ class AdminServices:
         session: AsyncSession,
         currency: Currency,
         websocket_status: dict,
+        background_jobs: dict | None = None,
     ) -> AdminOverviewRead:
         analytics = await self.get_admin_analytics(session=session)
-        system_status = await self.get_system_status(websocket_status=websocket_status)
+        system_status = await self.get_system_status(
+            websocket_status=websocket_status,
+            background_jobs=background_jobs,
+        )
         system_tracked_events = await self.market_services.list_system_tracked_events(
             session=session,
             currency=currency,
@@ -161,10 +167,12 @@ class AdminServices:
         self,
         *,
         websocket_status: dict,
+        background_jobs: dict | None = None,
     ) -> AdminSystemStatusRead:
         return AdminSystemStatusRead(
             redis_ok=await self._redis_ok(),
             websocket=websocket_status,
+            background_jobs=background_jobs or {},
         )
 
     async def track_event_for_system(
@@ -173,11 +181,13 @@ class AdminServices:
         session: AsyncSession,
         admin_user_id,
         event_id: str,
+        source: MarketSource,
         currency: Currency,
     ) -> dict:
         result = await self.market_services.track_event_for_system(
             session=session,
             event_id=event_id,
+            source=source,
             currency=currency,
         )
         await self._log_admin_action(
@@ -189,6 +199,7 @@ class AdminServices:
             details={
                 "tracked_markets_count": result.tracked_markets_count,
                 "event_title": result.event_title,
+                "source": source.value,
             },
         )
         return result.model_dump()
@@ -199,11 +210,13 @@ class AdminServices:
         session: AsyncSession,
         admin_user_id,
         event_id: str,
+        source: MarketSource,
         currency: Currency,
     ) -> dict:
         result = await self.market_services.untrack_event_for_system(
             session=session,
             event_id=event_id,
+            source=source,
             currency=currency,
         )
         await self._log_admin_action(
@@ -215,6 +228,7 @@ class AdminServices:
             details={
                 "tracked_markets_count": result.tracked_markets_count,
                 "event_title": result.event_title,
+                "source": source.value,
             },
         )
         return result.model_dump()

@@ -5,7 +5,7 @@ from src.auth.schemas import (
     ResetPasswordInput, RenewAccessTokenInput, ResendOtpInput, LogoutInput, OtpTypes
 )
 from sqlmodel.ext.asyncio.session import AsyncSession
-from fastapi import HTTPException, status, Response, BackgroundTasks
+from fastapi import HTTPException, status, Response, BackgroundTasks, Request
 from src.utils.logger import logger
 from src.utils.auth import generate_password_hash, verify_password_hash, create_token, decode_token, TokenType
 from datetime import datetime, timezone, timedelta
@@ -27,6 +27,93 @@ cookie_settings = {
 }
 
 class AuthServices:
+    def _origin_host(self, request: Request | None) -> str | None:
+        if not request:
+            return None
+
+        origin = request.headers.get("origin")
+        if not origin:
+            return None
+
+        try:
+            from urllib.parse import urlparse
+
+            return (urlparse(origin).hostname or "").lower() or None
+        except Exception:
+            return None
+
+    def _request_host(self, request: Request | None) -> str | None:
+        if not request:
+            return None
+        return (request.url.hostname or "").lower() or None
+
+    def _is_local_host(self, host: str | None) -> bool:
+        return host in {"localhost", "127.0.0.1", "::1"}
+
+    def _build_cookie_settings(self, request: Request | None = None) -> dict:
+        request_host = self._request_host(request)
+        origin_host = self._origin_host(request)
+
+        same_origin = (
+            request_host is not None
+            and origin_host is not None
+            and request_host == origin_host
+        )
+        both_local = self._is_local_host(request_host) and self._is_local_host(origin_host)
+
+        if Config.IS_PRODUCTION or (origin_host and request_host and not same_origin and not both_local):
+            return {
+                "httponly": True,
+                "secure": True,
+                "samesite": "none",
+                "path": "/",
+            }
+
+        return {
+            "httponly": True,
+            "secure": False,
+            "samesite": "lax",
+            "path": "/",
+        }
+
+    def _set_auth_cookies(
+        self,
+        *,
+        response: Response,
+        access_token: str,
+        refresh_token: str,
+        request: Request | None = None,
+    ) -> None:
+        settings = self._build_cookie_settings(request)
+        response.set_cookie(
+            key="access_token",
+            value=access_token,
+            **settings,
+            max_age=int(access_token_expiry.total_seconds())
+        )
+        response.set_cookie(
+            key="refresh_token",
+            value=refresh_token,
+            **settings,
+            max_age=int(refresh_token_expiry.total_seconds())
+        )
+
+    def _clear_auth_cookies(self, *, response: Response, request: Request | None = None) -> None:
+        settings = self._build_cookie_settings(request)
+        response.delete_cookie(
+            key="access_token",
+            httponly=settings["httponly"],
+            samesite=settings["samesite"],
+            secure=settings["secure"],
+            path=settings["path"],
+        )
+        response.delete_cookie(
+            key="refresh_token",
+            httponly=settings["httponly"],
+            samesite=settings["samesite"],
+            secure=settings["secure"],
+            path=settings["path"],
+        )
 
     async def get_user(self, email:str, session:AsyncSession, return_data: bool):
         
@@ -44,7 +131,14 @@ class AuthServices:
             )
         return None
 
-    async def create_user(self, userInput: UserCreateInput, session: AsyncSession, background_tasks: BackgroundTasks, response: Response):
+    async def create_user(
+        self,
+        userInput: UserCreateInput,
+        session: AsyncSession,
+        background_tasks: BackgroundTasks,
+        response: Response,
+        request: Request | None = None,
+    ):
         # Verify user doesn't already exist
         await self.get_user(userInput.email, session, return_data=False)
         
@@ -75,18 +169,11 @@ class AuthServices:
                 otp_record.otp
             )
 
-            response.set_cookie(
-                key="access_token",
-                value=access_token,
-                **cookie_settings,
-                max_age=int(access_token_expiry.total_seconds())
-            )
-
-            response.set_cookie(
-                key="refresh_token",
-                value=refresh_token,
-                **cookie_settings,
-                max_age=int(refresh_token_expiry.total_seconds())
+            self._set_auth_cookies(
+                response=response,
+                access_token=access_token,
+                refresh_token=refresh_token,
+                request=request,
             )
             
             return {
@@ -104,7 +191,14 @@ class AuthServices:
                 detail="Internal server error"
             )
     
-    async def verify_otp(self, otp_input: VerifyOtpInput, session: AsyncSession, background_tasks: BackgroundTasks):
+    async def verify_otp(
+        self,
+        otp_input: VerifyOtpInput,
+        session: AsyncSession,
+        background_tasks: BackgroundTasks,
+        response: Response | None = None,
+        request: Request | None = None,
+    ):
         """Verify a user's OTP and activate their account."""
         
         model = SignupOtp if otp_input.otp_type == OtpTypes.SIGNUP else ForgotPasswordOtp
@@ -171,7 +265,23 @@ class AuthServices:
                     user.email
                 )
 
-                return user.model_dump()
+                if response is not None:
+                    user_dict = user.model_dump()
+                    access_token = create_token(user_dict, token_type="access")
+                    refresh_token = create_token(user_dict, token_type="refresh")
+                    self._set_auth_cookies(
+                        response=response,
+                        access_token=access_token,
+                        refresh_token=refresh_token,
+                        request=request,
+                    )
+
+                return {
+                    "uid": str(user.uid),
+                    "email": user.email,
+                    "email_verified": user.email_verified,
+                    "role": user.role,
+                }
 
             except Exception as e:
                 logger.error(f"Error validating otp user logic: {e}")
@@ -281,6 +391,7 @@ class AuthServices:
         loginInput: UserLoginInput,
         session: AsyncSession,
         response: Response,
+        request: Request | None = None,
         required_role: str | None = None,
     ):
         user = await self.get_user(loginInput.email, session, True)
@@ -299,7 +410,7 @@ class AuthServices:
                 detail=f"Please verify your account before you can login. [UID:{user.uid}]"
             )
 
-        if required_role and str(user.role) != required_role:
+        if required_role and user.role.value != required_role:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You are not permitted to use this login route",
@@ -315,18 +426,11 @@ class AuthServices:
         access_token = create_token(user_dict, token_type="access")
         refresh_token = create_token(user_dict, token_type="refresh")
         
-        response.set_cookie(
-            key="access_token",
-            value=access_token,
-            **cookie_settings,
-            max_age=int(access_token_expiry.total_seconds())
-        )
-
-        response.set_cookie(
-            key="refresh_token",
-            value=refresh_token,
-            **cookie_settings,
-            max_age=int(refresh_token_expiry.total_seconds())
+        self._set_auth_cookies(
+            response=response,
+            access_token=access_token,
+            refresh_token=refresh_token,
+            request=request,
         )
 
         return {
@@ -392,7 +496,13 @@ class AuthServices:
                 detail="Internal server error"
             )
         
-    async def renew_access_token(self, old_refresh_token_str: str, session: AsyncSession, response: Response):
+    async def renew_access_token(
+        self,
+        old_refresh_token_str: str,
+        session: AsyncSession,
+        response: Response,
+        request: Request | None = None,
+    ):
         old_refresh_token_decode = decode_token(old_refresh_token_str)
 
         if old_refresh_token_decode.get('type') != "refresh":
@@ -425,18 +535,11 @@ class AuthServices:
         await self.add_token_to_blocklist(old_refresh_token_str)
         new_refresh_token = create_token(user_data, token_type="refresh")
         
-        response.set_cookie(
-            key="access_token",
-            value=new_token,
-            **cookie_settings,
-            max_age=int(access_token_expiry.total_seconds())
-        )
-
-        response.set_cookie(
-            key="refresh_token",
-            value=new_refresh_token,
-            **cookie_settings,
-            max_age=int(refresh_token_expiry.total_seconds())
+        self._set_auth_cookies(
+            response=response,
+            access_token=new_token,
+            refresh_token=new_refresh_token,
+            request=request,
         )
 
         return {}
@@ -464,7 +567,13 @@ class AuthServices:
             logger.error(f"Redis error in is_token_blacklisted: {e}")
             return False
     
-    async def logout(self, response: Response, access_token: str = None, refresh_token: str = None):
+    async def logout(
+        self,
+        response: Response,
+        access_token: str = None,
+        refresh_token: str = None,
+        request: Request | None = None,
+    ):
         if access_token == None and refresh_token == None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -476,22 +585,14 @@ class AuthServices:
         if refresh_token:
             await self.add_token_to_blocklist(refresh_token)
 
-        response.delete_cookie(
-            key="access_token",
-            httponly=cookie_settings["httponly"],
-            samesite=cookie_settings["samesite"],
-            secure=cookie_settings["secure"],
-        )
-        response.delete_cookie(
-            key="refresh_token",
-            httponly=cookie_settings["httponly"],
-            samesite=cookie_settings["samesite"],
-            secure=cookie_settings["secure"],
-        )
+        self._clear_auth_cookies(response=response, request=request)
         
         return {}
 
     async def get_me(self, current_user):
-        user_dict = current_user.model_dump()
-
-        return user_dict
+        return {
+            "uid": str(current_user.uid),
+            "email": current_user.email,
+            "email_verified": current_user.email_verified,
+            "role": current_user.role,
+        }

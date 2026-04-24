@@ -28,6 +28,7 @@ from src.utils.logger import logger
 
 class BayseWebSocketManager:
     WS_URL = "wss://socket.bayse.markets/ws/v1/markets"
+    ORDERBOOK_BATCH_SIZE = 10
 
     def __init__(
         self,
@@ -208,7 +209,8 @@ class BayseWebSocketManager:
         for metric in event_metrics:
             currency_map[metric.event_id].add(metric.currency)
         for event_id in event_ids:
-            currency_map[event_id].add(Currency.DOLLAR)
+            if not currency_map[event_id]:
+                currency_map[event_id].add(Currency.DOLLAR)
 
         for event_id in event_ids:
             await self._subscribe_prices(event_id)
@@ -280,28 +282,33 @@ class BayseWebSocketManager:
         if not pending_market_ids:
             return
 
-        payload = {
-            "type": "subscribe",
-            "channel": "orderbook",
-            "marketIds": pending_market_ids,
-            "currency": currency.value,
-        }
-        await self._ws.send(json.dumps(payload))
+        subscribed_count = 0
+        for start in range(0, len(pending_market_ids), self.ORDERBOOK_BATCH_SIZE):
+            market_batch = pending_market_ids[start : start + self.ORDERBOOK_BATCH_SIZE]
+            payload = {
+                "type": "subscribe",
+                "channel": "orderbook",
+                "marketIds": market_batch,
+                "currency": currency.value,
+            }
+            await self._ws.send(json.dumps(payload))
 
-        for market_id in pending_market_ids:
-            self._active_subscriptions.add(("orderbook", market_id, None, currency.value))
-            await self.live_state.set_subscription_state(
-                SubscriptionLiveState(
-                    source=MarketSource.BAYSE,
-                    event_id="",
-                    market_id=market_id,
-                    channel=f"orderbook:{currency.value}",
-                    active=True,
+            for market_id in market_batch:
+                self._active_subscriptions.add(("orderbook", market_id, None, currency.value))
+                await self.live_state.set_subscription_state(
+                    SubscriptionLiveState(
+                        source=MarketSource.BAYSE,
+                        event_id="",
+                        market_id=market_id,
+                        channel=f"orderbook:{currency.value}",
+                        active=True,
+                    )
                 )
-            )
+            subscribed_count += len(market_batch)
+
         logger.info(
             "Subscribed to Bayse orderbook for %s CLOB markets in %s",
-            len(pending_market_ids),
+            subscribed_count,
             currency.value,
         )
 
@@ -611,7 +618,19 @@ class BayseWebSocketManager:
                     select(TrackedMarket.event_id).where(TrackedMarket.is_system_tracked == True)
                 )
             )
-            event_ids = sorted(tracked_event_ids | system_tracked_event_ids)
+            all_event_ids = tracked_event_ids | system_tracked_event_ids
+            if not all_event_ids:
+                return
+
+            # Only resync events that are actually sourced from Bayse — skip Polymarket events
+            bayse_event_ids_result = await session.exec(
+                select(TrackedMarket.event_id).where(
+                    TrackedMarket.source == MarketSource.BAYSE,
+                    TrackedMarket.event_id.in_(all_event_ids),
+                    TrackedMarket.tracking_enabled == True,
+                )
+            )
+            event_ids = sorted(set(bayse_event_ids_result.all()))
             if not event_ids:
                 return
 
@@ -627,7 +646,8 @@ class BayseWebSocketManager:
         for metric in metrics:
             event_currency_map[metric.event_id].add(metric.currency)
         for event_id in event_ids:
-            event_currency_map[event_id].add(Currency.DOLLAR)
+            if not event_currency_map[event_id]:
+                event_currency_map[event_id].add(Currency.DOLLAR)
 
         for event_id in event_ids:
             for currency in event_currency_map[event_id]:

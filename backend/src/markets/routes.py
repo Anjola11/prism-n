@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Request, status
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from src.db.main import get_session
-from src.markets.models import Currency
+from src.markets.models import Currency, MarketSource
 from src.markets.schemas import SuccessResponse
 from src.markets.services import MarketServices
 from src.utils.bayse import BayseServices
@@ -26,8 +26,12 @@ def get_market_services(
 ) -> MarketServices:
     return MarketServices(
         bayse=bayse,
+        polymarket=request.app.state.polymarket,
+        polymarket_clob=request.app.state.polymarket_clob,
+        polymarket_data=request.app.state.polymarket_data,
         live_state=request.app.state.live_state,
         baseline_services=request.app.state.baseline_services,
+        scoring_services=request.app.state.scoring_services,
     )
 
 
@@ -38,6 +42,7 @@ def get_market_services(
 )
 async def track_event(
     event_id: str,
+    source: MarketSource = MarketSource.BAYSE,
     currency: Currency = Currency.DOLLAR,
     session: AsyncSession = Depends(get_session),
     market_services: MarketServices = Depends(get_market_services),
@@ -48,6 +53,7 @@ async def track_event(
         session=session,
         user_id=user_id,
         event_id=event_id,
+        source=source,
         currency=currency,
     )
     return success_response(
@@ -62,6 +68,7 @@ async def track_event(
     status_code=status.HTTP_200_OK,
 )
 async def get_discovery_events(
+    source: MarketSource | None = None,
     currency: Currency = Currency.DOLLAR,
     session: AsyncSession = Depends(get_session),
     market_services: MarketServices = Depends(get_market_services),
@@ -71,6 +78,7 @@ async def get_discovery_events(
     result = await market_services.get_discovery_feed_for_user(
         session=session,
         user_id=user_id,
+        source=source,
         currency=currency,
     )
     return success_response(
@@ -86,6 +94,7 @@ async def get_discovery_events(
 )
 async def get_event_detail(
     event_id: str,
+    source: MarketSource = MarketSource.BAYSE,
     currency: Currency = Currency.DOLLAR,
     session: AsyncSession = Depends(get_session),
     market_services: MarketServices = Depends(get_market_services),
@@ -96,6 +105,7 @@ async def get_event_detail(
         session=session,
         user_id=user_id,
         event_id=event_id,
+        source=source,
         currency=currency,
     )
     return success_response(
@@ -111,6 +121,7 @@ async def get_event_detail(
 )
 async def untrack_event(
     event_id: str,
+    source: MarketSource = MarketSource.BAYSE,
     currency: Currency = Currency.DOLLAR,
     session: AsyncSession = Depends(get_session),
     market_services: MarketServices = Depends(get_market_services),
@@ -121,6 +132,7 @@ async def untrack_event(
         session=session,
         user_id=user_id,
         event_id=event_id,
+        source=source,
         currency=currency,
     )
     return success_response(

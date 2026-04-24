@@ -5,7 +5,7 @@ from src.admin.schemas import AdminLoginInput
 from src.admin.services import AdminServices
 from src.auth.services import AuthServices
 from src.db.main import get_session
-from src.markets.models import Currency
+from src.markets.models import Currency, MarketSource
 from src.markets.services import MarketServices
 from src.markets.routes import get_market_services
 from src.markets.schemas import SuccessResponse
@@ -33,6 +33,7 @@ def get_admin_services(
 )
 async def admin_login(
     login_input: AdminLoginInput,
+    request: Request,
     response: Response,
     session: AsyncSession = Depends(get_session),
     admin_services: AdminServices = Depends(get_admin_services),
@@ -42,6 +43,7 @@ async def admin_login(
         login_input=login_input,
         session=session,
         response=response,
+        request=request,
     )
     return success_response(
         message="Admin login successful",
@@ -59,7 +61,12 @@ async def admin_me(
 ):
     return success_response(
         message="Admin details fetched successfully",
-        data=current_admin.model_dump(),
+        data={
+            "uid": str(current_admin.uid),
+            "email": current_admin.email,
+            "email_verified": current_admin.email_verified,
+            "role": current_admin.role,
+        },
     )
 
 
@@ -79,7 +86,18 @@ async def admin_overview(
     result = await admin_services.get_admin_overview(
         session=session,
         currency=currency,
-        websocket_status=request.app.state.bayse_ws_manager.get_status(),
+        websocket_status={
+            "bayse": request.app.state.bayse_ws_manager.get_status(),
+            "polymarket": request.app.state.polymarket_ws_manager.get_status(),
+        },
+        background_jobs={
+            "baseline_scheduler_running": bool(
+                request.app.state.baseline_scheduler._task and not request.app.state.baseline_scheduler._task.done()
+            ),
+            "discovery_worker_running": bool(
+                request.app.state.discovery_worker._task and not request.app.state.discovery_worker._task.done()
+            ),
+        },
     )
     return success_response(
         message="Admin overview fetched successfully",
@@ -93,6 +111,7 @@ async def admin_overview(
     status_code=status.HTTP_200_OK,
 )
 async def admin_discovery(
+    source: MarketSource | None = None,
     currency: Currency = Currency.DOLLAR,
     session: AsyncSession = Depends(get_session),
     market_services: MarketServices = Depends(get_market_services),
@@ -101,6 +120,7 @@ async def admin_discovery(
     logger.info("Admin discovery requested by %s in %s", admin_user_id, currency.value)
     result = await market_services.get_discovery_feed_for_system(
         session=session,
+        source=source,
         currency=currency,
     )
     return success_response(
@@ -161,7 +181,18 @@ async def admin_system_status(
 ):
     logger.info("Admin system status requested by %s", admin_user_id)
     result = await admin_services.get_system_status(
-        websocket_status=request.app.state.bayse_ws_manager.get_status(),
+        websocket_status={
+            "bayse": request.app.state.bayse_ws_manager.get_status(),
+            "polymarket": request.app.state.polymarket_ws_manager.get_status(),
+        },
+        background_jobs={
+            "baseline_scheduler_running": bool(
+                request.app.state.baseline_scheduler._task and not request.app.state.baseline_scheduler._task.done()
+            ),
+            "discovery_worker_running": bool(
+                request.app.state.discovery_worker._task and not request.app.state.discovery_worker._task.done()
+            ),
+        },
     )
     return success_response(
         message="Admin system status fetched successfully",
@@ -176,6 +207,7 @@ async def admin_system_status(
 )
 async def admin_track_for_system(
     event_id: str,
+    source: MarketSource = MarketSource.BAYSE,
     currency: Currency = Currency.DOLLAR,
     session: AsyncSession = Depends(get_session),
     admin_services: AdminServices = Depends(get_admin_services),
@@ -186,6 +218,7 @@ async def admin_track_for_system(
         session=session,
         admin_user_id=admin_user_id,
         event_id=event_id,
+        source=source,
         currency=currency,
     )
     return success_response(
@@ -201,6 +234,7 @@ async def admin_track_for_system(
 )
 async def admin_untrack_for_system(
     event_id: str,
+    source: MarketSource = MarketSource.BAYSE,
     currency: Currency = Currency.DOLLAR,
     session: AsyncSession = Depends(get_session),
     admin_services: AdminServices = Depends(get_admin_services),
@@ -211,6 +245,7 @@ async def admin_untrack_for_system(
         session=session,
         admin_user_id=admin_user_id,
         event_id=event_id,
+        source=source,
         currency=currency,
     )
     return success_response(

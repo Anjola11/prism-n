@@ -91,9 +91,15 @@ class TrackedEventRead(BaseModel):
     source: MarketSource
     currency: Currency
     event_type: EventType
+    category: str | None = None
+    status: str | None = None
     engine: MarketEngine
+    total_liquidity: float | None = None
+    event_total_orders: int | None = None
+    closing_date: datetime | None = None
     tracked_markets_count: int
     tracking_enabled: bool
+    data_mode: str = "tracked_live"
     last_updated: str | None = None
     ai_insight: str = "Insight unavailable"
     highest_scoring_market: HighestScoringMarketRead | None = None
@@ -133,6 +139,7 @@ class EventDetailRead(BaseModel):
     closing_date: datetime | None = None
     tracked_markets_count: int
     tracking_enabled: bool = False
+    data_mode: str = "lite_snapshot"
     last_updated: str | None = None
     ai_insight: str = "Insight unavailable"
     highest_scoring_market: HighestScoringMarketRead | None = None
@@ -154,6 +161,7 @@ class DiscoveryEventRead(BaseModel):
     closing_date: datetime | None = None
     tracked_markets_count: int
     tracking_enabled: bool = False
+    data_mode: str = "lite_snapshot"
     last_updated: str | None = None
     ai_insight: str = "Insight unavailable"
     highest_scoring_market: HighestScoringMarketRead | None = None

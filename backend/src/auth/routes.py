@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, status, Response, Cookie, BackgroundTasks
+from fastapi import APIRouter, Depends, status, Response, Cookie, BackgroundTasks, Request
 from sqlmodel.ext.asyncio.session import AsyncSession
 from src.auth.schemas import (
     UserCreateInput,
@@ -27,12 +27,13 @@ def get_auth_services() -> AuthServices:
 async def create_user(
     user_input: UserCreateInput, 
     background_tasks: BackgroundTasks,
+    request: Request,
     response: Response,
     session: AsyncSession = Depends(get_session),
     auth_services: AuthServices = Depends(get_auth_services)
 ):
     logger.info(f"Signup attempt for email: {user_input.email}")
-    result = await auth_services.create_user(user_input, session, background_tasks, response)
+    result = await auth_services.create_user(user_input, session, background_tasks, response, request)
     logger.info(f"Signup successful for email: {user_input.email}")
     return success_response(
         message="Signup successful, an OTP has been sent to your email to verify your account.",
@@ -43,14 +44,16 @@ async def create_user(
 async def verify_otp(
     otp_input: VerifyOtpInput,
     background_tasks: BackgroundTasks,
+    request: Request,
+    response: Response,
     session: AsyncSession = Depends(get_session),
     auth_services: AuthServices = Depends(get_auth_services)
 ):
     logger.info(f"OTP Verification attempt for user ID: {otp_input.uid}")
-    result = await auth_services.verify_otp(otp_input, session, background_tasks)
+    result = await auth_services.verify_otp(otp_input, session, background_tasks, response, request)
     message = "OTP verified successfully"
     if otp_input.otp_type == "signup":
-        message = "OTP verified successfully. You can now login."
+        message = "OTP verified successfully."
     return success_response(
         message=message,
         data=result,
@@ -105,12 +108,13 @@ async def reset_password(
 @auth_router.post('/login', response_model=UserLoginResponse, status_code=status.HTTP_200_OK)
 async def login(
     login_input: UserLoginInput,
+    request: Request,
     response: Response,
     session: AsyncSession = Depends(get_session),
     auth_services: AuthServices = Depends(get_auth_services)
 ):
     logger.info(f"Login attempt for email: {login_input.email}")
-    result = await auth_services.login_user(login_input, session, response)
+    result = await auth_services.login_user(login_input, session, response, request=request)
     logger.info(f"Login successful for email: {login_input.email}")
     return success_response(
         message="Login successful",
@@ -119,13 +123,14 @@ async def login(
 
 @auth_router.post('/renew-access-token', response_model=RenewAccessTokenResponse, status_code=status.HTTP_200_OK)
 async def renew_access_token(
+    request: Request,
     response: Response,
     session: AsyncSession = Depends(get_session),
     auth_services: AuthServices = Depends(get_auth_services),
     refresh_token: str | None = Cookie(default=None)
 ):
     logger.info("Renew access token request received.")
-    result = await auth_services.renew_access_token(refresh_token, session, response)
+    result = await auth_services.renew_access_token(refresh_token, session, response, request)
     logger.info("Access token effectively renewed.")
     return success_response(
         message="Access token renewed",
@@ -134,13 +139,14 @@ async def renew_access_token(
 
 @auth_router.post('/logout', response_model=LogoutResponse, status_code=status.HTTP_200_OK)
 async def logout(
+    request: Request,
     response: Response,
     auth_services: AuthServices = Depends(get_auth_services),
     access_token: str | None = Cookie(default=None),
     refresh_token: str | None = Cookie(default=None)
 ):
     logger.info("Logout request received.")
-    result = await auth_services.logout(response, access_token, refresh_token)
+    result = await auth_services.logout(response, access_token, refresh_token, request)
     logger.info("Logout successful.")
     return success_response(
         message="Logged out successfully",

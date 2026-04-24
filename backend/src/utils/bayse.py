@@ -21,6 +21,7 @@ BASE_URL = "https://relay.bayse.markets/v1/pm/"
 
 
 class BayseServices:
+    MAX_RETRIES = 2
 
     def __init__(self):
         self.client = httpx.AsyncClient(
@@ -56,30 +57,41 @@ class BayseServices:
         params = self._clean_params(params)
         logger.info("Bayse GET %s params=%s", path, params)
 
-        try:
-            response = await self.client.get(url=path, params=params)
+        for attempt in range(1, self.MAX_RETRIES + 1):
+            try:
+                response = await self.client.get(url=path, params=params)
 
-            response.raise_for_status()
+                response.raise_for_status()
 
-            logger.info("Bayse GET success %s status=%s", path, response.status_code)
-            return response.json()
+                logger.info("Bayse GET success %s status=%s", path, response.status_code)
+                return response.json()
 
-        except httpx.HTTPStatusError as e:
-            logger.error(
-                "Bayse HTTP error status=%s url=%s body=%s",
-                e.response.status_code,
-                e.request.url,
-                e.response.text,
-            )
-            raise
+            except httpx.HTTPStatusError as e:
+                logger.error(
+                    "Bayse HTTP error status=%s url=%s body=%s",
+                    e.response.status_code,
+                    e.request.url,
+                    e.response.text,
+                )
+                raise
 
-        except httpx.RequestError as e:
-            logger.error("Bayse request error url=%s error=%s", e.request.url, e)
-            raise 
+            except httpx.TimeoutException as e:
+                logger.warning(
+                    "Bayse timeout attempt=%s/%s url=%s",
+                    attempt,
+                    self.MAX_RETRIES,
+                    e.request.url,
+                )
+                if attempt >= self.MAX_RETRIES:
+                    logger.error("Bayse timeout exhausted for url=%s", e.request.url, exc_info=True)
+                    raise
+            except httpx.RequestError as e:
+                logger.error("Bayse request error url=%s error=%s", e.request.url, e)
+                raise
 
-        except Exception as e:
-            logger.error("Unexpected Bayse client error: %s", e, exc_info=True)
-            raise
+            except Exception as e:
+                logger.error("Unexpected Bayse client error: %s", e, exc_info=True)
+                raise
 
     async def get_all_listings(
         self,
@@ -97,6 +109,19 @@ class BayseServices:
 
         listings = await self.base_call(path, params)
         return listings
+
+    async def get_all_listings_safe(
+        self,
+        trending: bool = True,
+        currency: Currency = Currency.DOLLAR,
+    ) -> dict | None:
+        """Like get_all_listings but returns None on timeout/network errors
+        instead of raising. Intended for background workers."""
+        try:
+            return await self.get_all_listings(trending=trending, currency=currency)
+        except (httpx.TimeoutException, httpx.RequestError):
+            logger.warning("Bayse listings fetch failed safely for %s", currency.value)
+            return None
 
     async def get_event_by_id(
         self,
