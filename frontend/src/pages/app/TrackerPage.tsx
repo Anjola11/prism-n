@@ -1,17 +1,29 @@
 import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
-import { mockEvents } from '../../data/mockEvents';
+import { marketsApi } from '../../lib/api/markets';
+import { mapDiscoveryEvent } from '../../lib/api/adapters';
+import { DiscoveryCardViewModel } from '../../lib/api/types';
 import { SignalCard } from '../../components/ui/SignalCard';
 import gsap from 'gsap';
 
 export function TrackerPage() {
   const container = useRef<HTMLDivElement>(null);
-  
-  // Pre-seed with actual volatile markets natively to prevent empty state per intelligence plan
-  const trackedEvents = [mockEvents[0], mockEvents[2]];
-  
+  const [events, setEvents] = useState<DiscoveryCardViewModel[]>([]);
   const [syncTimer, setSyncTimer] = useState(12);
 
-  // Fake live polling
+  useEffect(() => {
+    async function fetchTracker() {
+      try {
+        const apiEvents = await marketsApi.getTracker();
+        const mapped = apiEvents.map(mapDiscoveryEvent);
+        setEvents(mapped);
+      } catch (err) {
+        console.error("Failed to fetch tracked events", err);
+      }
+    }
+    fetchTracker();
+  }, []);
+
+  // Fake live polling visualization
   useEffect(() => {
     const interval = setInterval(() => {
       setSyncTimer(prev => (prev >= 30 ? 0 : prev + 1));
@@ -20,6 +32,7 @@ export function TrackerPage() {
   }, []);
 
   useLayoutEffect(() => {
+    if (events.length === 0) return;
     const ctx = gsap.context(() => {
       gsap.fromTo('.event-card-wrapper', 
         { opacity: 0, y: 15 },
@@ -34,16 +47,32 @@ export function TrackerPage() {
       );
     }, container);
     return () => ctx.revert();
-  }, []);
+  }, [events]);
 
-  // Use the same track/untrack local mock state for UI responsiveness
-  const [tracked, setTracked] = useState<Record<string, boolean>>(
-    Object.fromEntries(trackedEvents.map(e => [e.id, true]))
-  );
+  const [tracked, setTracked] = useState<Record<string, boolean>>({});
 
-  const toggleTrack = (e: React.MouseEvent, id: string) => {
+  useEffect(() => {
+    if (events.length > 0) {
+      setTracked(Object.fromEntries(events.map(e => [e.id, true])));
+    }
+  }, [events]);
+
+  const toggleTrack = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
-    setTracked(prev => ({ ...prev, [id]: !prev[id] }));
+    const isTracking = !tracked[id];
+    setTracked(prev => ({ ...prev, [id]: isTracking }));
+    try {
+      if (isTracking) {
+         await marketsApi.trackEvent(id);
+      } else {
+         await marketsApi.untrackEvent(id);
+         // Optionally remove from the list instantly:
+         setEvents(prev => prev.filter(ev => ev.id !== id));
+      }
+    } catch (err) {
+      console.error("Tracking action failed", err);
+      setTracked(prev => ({ ...prev, [id]: !isTracking }));
+    }
   };
 
   return (
@@ -56,7 +85,7 @@ export function TrackerPage() {
       </div>
       
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 gap-5">
-        {trackedEvents.map(event => (
+        {events.map(event => (
           <div key={event.id} className="event-card-wrapper h-full">
             <SignalCard 
                event={event} 
@@ -65,6 +94,9 @@ export function TrackerPage() {
             />
           </div>
         ))}
+        {events.length === 0 && (
+          <p className="text-sm text-text-muted mt-4">You are not tracking any events yet.</p>
+        )}
       </div>
     </div>
   );
