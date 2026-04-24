@@ -8,9 +8,42 @@ import type {
   ApiResponse,
   AuthUserApi,
   DiscoveryEventApi,
+  PaginatedResponse,
 } from './types';
 
 const unwrap = <T>(response: { data: ApiResponse<T> }): T => response.data.data;
+
+const normalizePaginated = <T>(
+  data: T[] | PaginatedResponse<T> | null | undefined,
+  page: number,
+  limit: number,
+): PaginatedResponse<T> => {
+  if (Array.isArray(data)) {
+    return {
+      items: data,
+      pagination: {
+        page,
+        limit,
+        total: data.length,
+        has_more: false,
+      },
+    };
+  }
+
+  if (data && Array.isArray((data as PaginatedResponse<T>).items) && (data as PaginatedResponse<T>).pagination) {
+    return data as PaginatedResponse<T>;
+  }
+
+  return {
+    items: [],
+    pagination: {
+      page,
+      limit,
+      total: 0,
+      has_more: false,
+    },
+  };
+};
 
 export const adminApi = {
   login: async (email: string, password: string): Promise<AuthUserApi> => {
@@ -40,16 +73,36 @@ export const adminApi = {
     });
     return unwrap(response);
   },
-  getDiscovery: async (currency = DEFAULT_CURRENCY, source?: string): Promise<DiscoveryEventApi[]> => {
-    const response = await api.get('/admin/discovery', { params: { currency, source } });
-    return unwrap(response) || [];
+  getDiscoveryPage: async (
+    page = 1,
+    limit = 20,
+    currency = DEFAULT_CURRENCY,
+    source?: string,
+  ): Promise<PaginatedResponse<DiscoveryEventApi>> => {
+    const response = await api.get('/admin/discovery', {
+      params: { currency, source, page, limit },
+      timeout: 45000,
+    });
+    return normalizePaginated(unwrap(response), page, limit);
   },
-  getSystemTracker: async (currency = DEFAULT_CURRENCY): Promise<DiscoveryEventApi[]> => {
+  getDiscovery: async (currency = DEFAULT_CURRENCY, source?: string): Promise<DiscoveryEventApi[]> => {
+    const paged = await adminApi.getDiscoveryPage(1, 100, currency, source);
+    return paged.items;
+  },
+  getSystemTrackerPage: async (
+    page = 1,
+    limit = 20,
+    currency = DEFAULT_CURRENCY,
+  ): Promise<PaginatedResponse<DiscoveryEventApi>> => {
     const response = await api.get('/admin/system-tracker', {
-      params: { currency },
+      params: { currency, page, limit },
       timeout: 60000,
     });
-    return unwrap(response) || [];
+    return normalizePaginated(unwrap(response), page, limit);
+  },
+  getSystemTracker: async (currency = DEFAULT_CURRENCY): Promise<DiscoveryEventApi[]> => {
+    const paged = await adminApi.getSystemTrackerPage(1, 100, currency);
+    return paged.items;
   },
   systemTrack: async (eventId: string, currency = DEFAULT_CURRENCY, source?: string): Promise<any> => {
     const response = await api.post(`/admin/system-track/${eventId}`, null, { params: { currency, source } });

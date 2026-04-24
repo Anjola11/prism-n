@@ -1,15 +1,24 @@
 import asyncio
+from collections import defaultdict
 from datetime import datetime, timezone
 from uuid import UUID
+from uuid import uuid4
 
 import httpx
 import json
+from sqlalchemy import false, func, or_
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from fastapi import HTTPException, status
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from src.markets.baselines import BaselineServices
-from src.markets.live_state import LiveStateServices
+from src.markets.live_state import (
+    BayseSubscriptionPlan,
+    LiveStateServices,
+    PolymarketAssetBindingState,
+    PolymarketSubscriptionPlan,
+)
 from src.markets.models import (
     Currency,
     EventType,
@@ -42,6 +51,8 @@ class MarketServices:
     DISCOVERY_LISTINGS_CACHE_TTL = 60
     TRACKER_CACHE_TTL = 45
     EVENT_DETAIL_CACHE_TTL = 15
+    DISCOVERY_FEED_CACHE_TTL = 300
+    DISCOVERY_FEED_BUILD_LOCK_TTL = 30
 
     def __init__(
         self,
@@ -70,6 +81,145 @@ class MarketServices:
     def _event_detail_cache_id(self, *, event_id: str, currency: Currency) -> str:
         return f"event-detail:{event_id}:{currency.value}"
 
+    async def _refresh_subscription_plan_for_source(
+        self,
+        *,
+        session: AsyncSession,
+        source: MarketSource,
+    ) -> None:
+        if not self.live_state:
+            return
+
+        if source == MarketSource.POLYMARKET:
+            tracked_event_ids = set(
+                await session.exec(
+                    select(UserTrackedEvent.event_id).where(UserTrackedEvent.tracking_enabled == True)
+                )
+            )
+            tracked_event_filter = (
+                TrackedMarket.event_id.in_(tracked_event_ids)
+                if tracked_event_ids
+                else false()
+            )
+            tracked_markets = (
+                await session.exec(
+                    select(TrackedMarket).where(
+                        TrackedMarket.source == MarketSource.POLYMARKET,
+                        TrackedMarket.tracking_enabled == True,
+                        or_(
+                            TrackedMarket.is_system_tracked == True,
+                            tracked_event_filter,
+                        ),
+                    )
+                )
+            ).all()
+
+            plan = PolymarketSubscriptionPlan(
+                bindings=[
+                    PolymarketAssetBindingState(
+                        asset_id=market.yes_outcome_id,
+                        event_id=market.event_id,
+                        market_id=market.market_id,
+                        currency=Currency.DOLLAR.value,
+                        outcome_side="YES",
+                    )
+                    for market in tracked_markets
+                ] + [
+                    PolymarketAssetBindingState(
+                        asset_id=market.no_outcome_id,
+                        event_id=market.event_id,
+                        market_id=market.market_id,
+                        currency=Currency.DOLLAR.value,
+                        outcome_side="NO",
+                    )
+                    for market in tracked_markets
+                ]
+            )
+            await self.live_state.set_subscription_plan(
+                identifier=MarketSource.POLYMARKET.value,
+                payload=plan,
+            )
+            return
+
+        tracked_event_ids = set(
+            await session.exec(
+                select(UserTrackedEvent.event_id).where(UserTrackedEvent.tracking_enabled == True)
+            )
+        )
+        tracked_event_filter = (
+            TrackedMarket.event_id.in_(tracked_event_ids)
+            if tracked_event_ids
+            else false()
+        )
+        tracked_markets = (
+            await session.exec(
+                select(TrackedMarket).where(
+                    TrackedMarket.source == MarketSource.BAYSE,
+                    TrackedMarket.tracking_enabled == True,
+                    or_(
+                        TrackedMarket.is_system_tracked == True,
+                        tracked_event_filter,
+                    ),
+                )
+            )
+        ).all()
+
+        event_ids = sorted({market.event_id for market in tracked_markets})
+        currencies_by_event: dict[str, set[str]] = defaultdict(set)
+        orderbook_market_ids_by_currency: dict[str, set[str]] = defaultdict(set)
+
+        if event_ids:
+            event_metrics = (
+                await session.exec(
+                    select(TrackedEventMetric).where(
+                        TrackedEventMetric.source == MarketSource.BAYSE,
+                        TrackedEventMetric.event_id.in_(event_ids),
+                    )
+                )
+            ).all()
+            for metric in event_metrics:
+                currencies_by_event[metric.event_id].add(metric.currency.value)
+
+        for event_id in event_ids:
+            if not currencies_by_event[event_id]:
+                currencies_by_event[event_id].add(Currency.DOLLAR.value)
+
+        for market in tracked_markets:
+            if market.engine != MarketEngine.CLOB:
+                continue
+            for currency_value in currencies_by_event.get(market.event_id, {Currency.DOLLAR.value}):
+                orderbook_market_ids_by_currency[currency_value].add(market.market_id)
+
+        plan = BayseSubscriptionPlan(
+            event_ids=event_ids,
+            currencies_by_event={
+                event_id: sorted(currency_values)
+                for event_id, currency_values in currencies_by_event.items()
+            },
+            orderbook_market_ids_by_currency={
+                currency_value: sorted(market_ids)
+                for currency_value, market_ids in orderbook_market_ids_by_currency.items()
+            },
+        )
+        await self.live_state.set_subscription_plan(
+            identifier=MarketSource.BAYSE.value,
+            payload=plan,
+        )
+
+    async def _wait_for_discovery_cache_fill(self, *, currency: Currency) -> list[dict] | None:
+        if not self.live_state:
+            return None
+
+        for _ in range(12):
+            await asyncio.sleep(0.25)
+            cached = await self.live_state.get_read_model(
+                namespace="discovery-feed",
+                identifier=currency.value,
+            )
+            if cached is not None and isinstance(cached, list):
+                return cached
+        return None
+
     def _parse_datetime(self, value: str | None) -> datetime | None:
         if not value:
             return None
@@ -83,6 +233,7 @@ class MarketServices:
     def _normalize_event_type(self, raw_event_type: str) -> EventType:
         mapping = {
             "COMBINED_MARKETS": EventType.COMBINED,
+            "GROUPED_MARKETS": EventType.COMBINED,
             "SINGLE_MARKET": EventType.SINGLE,
         }
         try:
@@ -264,6 +415,30 @@ class MarketServices:
                 return market.market_image_url
         return None
 
+    def _get_payload_event_icon_url(
+        self,
+        *,
+        markets: list[dict] | None = None,
+        event_payload: dict | None = None,
+    ) -> str | None:
+        for market in markets or []:
+            if market.get("image128Url"):
+                return market["image128Url"]
+            if market.get("imageUrl"):
+                return market["imageUrl"]
+            if market.get("icon"):
+                return market["icon"]
+            if market.get("image"):
+                return market["image"]
+
+        if event_payload:
+            if event_payload.get("icon"):
+                return event_payload["icon"]
+            if event_payload.get("image"):
+                return event_payload["image"]
+
+        return None
+
     async def _get_live_event_metadata(
         self,
         *,
@@ -409,6 +584,8 @@ class MarketServices:
         for market in persisted_markets:
             yes_book = book_map.get(market.yes_outcome_id)
             no_book = book_map.get(market.no_outcome_id)
+            yes_bids = (yes_book or {}).get("bids") or []
+            yes_asks = (yes_book or {}).get("asks") or []
             current_probability = self.polymarket_clob.midpoint_from_book(yes_book)
             inverse_probability = self.polymarket_clob.midpoint_from_book(no_book)
             if current_probability is None and inverse_probability is not None:
@@ -425,10 +602,10 @@ class MarketServices:
                 event_liquidity=total_liquidity,
                 market_total_orders=market.market_total_orders,
                 event_total_orders=int(live_volume) if live_volume is not None else market.event_total_orders,
-                top_bid_depth=self.polymarket_clob.level_total((yes_book or {}).get("bids", [None])[0]) if yes_book else 0.0,
-                top_ask_depth=self.polymarket_clob.level_total((yes_book or {}).get("asks", [None])[0]) if yes_book else 0.0,
-                top_5_bid_depth=sum(self.polymarket_clob.level_total(level) for level in (yes_book or {}).get("bids", [])[:5]),
-                top_5_ask_depth=sum(self.polymarket_clob.level_total(level) for level in (yes_book or {}).get("asks", [])[:5]),
+                top_bid_depth=self.polymarket_clob.level_total(yes_bids[0]) if yes_bids else 0.0,
+                top_ask_depth=self.polymarket_clob.level_total(yes_asks[0]) if yes_asks else 0.0,
+                top_5_bid_depth=sum(self.polymarket_clob.level_total(level) for level in yes_bids[:5]),
+                top_5_ask_depth=sum(self.polymarket_clob.level_total(level) for level in yes_asks[:5]),
                 spread_bps=self.polymarket_clob.spread_bps_from_book(yes_book),
                 orderbook_supported=True,
                 ticker_supported=True,
@@ -485,6 +662,152 @@ class MarketServices:
             payload=events,
             ttl_seconds=self.DISCOVERY_LISTINGS_CACHE_TTL,
         )
+
+    async def _build_discovery_feed_fallback(
+        self,
+        *,
+        session: AsyncSession,
+        user_id: UUID | None = None,
+        source: MarketSource | None,
+        currency: Currency,
+    ) -> list[DiscoveryEventRead]:
+        tracked_ids = await self._get_user_tracked_event_ids(session, user_id) if user_id is not None else set()
+
+        bayse_events: list[dict] = []
+        polymarket_events: list[dict] = []
+
+        fetch_tasks = []
+        if source in (None, MarketSource.BAYSE):
+            fetch_tasks.append(self.bayse.get_all_listings(currency=currency))
+        else:
+            fetch_tasks.append(None)
+        if source in (None, MarketSource.POLYMARKET) and self.polymarket:
+            fetch_tasks.append(
+                self.polymarket.get_events(
+                    limit=24,
+                    active=True,
+                    closed=False,
+                    archived=False,
+                )
+            )
+        else:
+            fetch_tasks.append(None)
+
+        coroutines = [task for task in fetch_tasks if task is not None]
+        results = await asyncio.gather(*coroutines, return_exceptions=True) if coroutines else []
+
+        result_index = 0
+        if fetch_tasks[0] is not None:
+            result = results[result_index]
+            result_index += 1
+            if isinstance(result, Exception):
+                logger.warning("Discovery fallback: Bayse listings fetch failed", exc_info=True)
+            else:
+                bayse_events = result.get("events", [])
+
+        if len(fetch_tasks) > 1 and fetch_tasks[1] is not None:
+            result = results[result_index]
+            if isinstance(result, Exception):
+                logger.warning("Discovery fallback: Polymarket listings fetch failed", exc_info=True)
+            else:
+                polymarket_events = result
+
+        fallback_cards: list[DiscoveryEventRead] = []
+
+        for event_payload in bayse_events:
+            event_id = event_payload.get("id")
+            if not event_id:
+                continue
+            markets = event_payload.get("markets", [])
+            first_market = markets[0] if markets else {}
+            fallback_cards.append(
+                DiscoveryEventRead(
+                    event_id=event_id,
+                    event_title=event_payload.get("title", ""),
+                    event_slug=event_payload.get("slug"),
+                    event_icon_url=self._get_payload_event_icon_url(markets=markets),
+                    source=MarketSource.BAYSE,
+                    currency=currency,
+                    event_type=self._normalize_event_type(event_payload.get("type", "SINGLE_MARKET")),
+                    category=self._normalize_category(event_payload.get("category")),
+                    status=event_payload.get("status"),
+                    engine=self._normalize_engine(event_payload.get("engine", "AMM")),
+                    total_liquidity=event_payload.get("liquidity"),
+                    event_total_orders=event_payload.get("totalOrders"),
+                    closing_date=self._parse_datetime(event_payload.get("closingDate")),
+                    tracked_markets_count=len(markets),
+                    tracking_enabled=event_id in tracked_ids,
+                    data_mode="lite_snapshot",
+                    last_updated=None,
+                    ai_insight="Insight unavailable",
+                    highest_scoring_market=HighestScoringMarketRead(
+                        market_id=str(first_market.get("id") or ""),
+                        market_title=first_market.get("title", ""),
+                        current_probability=first_market.get("outcome1Price"),
+                        probability_delta=0.0,
+                        signal=SignalRead(),
+                    ) if first_market else None,
+                )
+            )
+
+        for event_payload in polymarket_events:
+            event_id = str(event_payload.get("id") or "")
+            if not event_id:
+                continue
+            markets = event_payload.get("markets", [])
+            first_market = markets[0] if markets else {}
+            total_liquidity = event_payload.get("liquidity")
+            if total_liquidity is None:
+                total_liquidity = event_payload.get("liquidityClob")
+            fallback_cards.append(
+                DiscoveryEventRead(
+                    event_id=event_id,
+                    event_title=event_payload.get("title", ""),
+                    event_slug=event_payload.get("slug"),
+                    event_icon_url=self._get_payload_event_icon_url(
+                        markets=markets,
+                        event_payload=event_payload,
+                    ),
+                    source=MarketSource.POLYMARKET,
+                    currency=Currency.DOLLAR,
+                    event_type=EventType.COMBINED if len(markets) > 1 else EventType.SINGLE,
+                    category=event_payload.get("category"),
+                    status=self._normalize_polymarket_status(event_payload),
+                    engine=MarketEngine.CLOB,
+                    total_liquidity=float(total_liquidity) if total_liquidity is not None else None,
+                    event_total_orders=int(float(event_payload.get("volume") or 0)),
+                    closing_date=self._parse_datetime(event_payload.get("endDate") or event_payload.get("closedTime")),
+                    tracked_markets_count=len(markets),
+                    tracking_enabled=event_id in tracked_ids,
+                    data_mode="lite_snapshot",
+                    last_updated=(
+                        self._parse_datetime(event_payload.get("updatedAt")).isoformat()
+                        if self._parse_datetime(event_payload.get("updatedAt"))
+                        else None
+                    ),
+                    ai_insight="Insight unavailable",
+                    highest_scoring_market=HighestScoringMarketRead(
+                        market_id=str(first_market.get("id") or ""),
+                        market_title=first_market.get("question") or first_market.get("slug") or event_payload.get("title", ""),
+                        current_probability=None,
+                        probability_delta=0.0,
+                        signal=SignalRead(),
+                    ) if first_market else None,
+                )
+            )
+
+        if source is None:
+            bayse_cards = [card for card in fallback_cards if card.source == MarketSource.BAYSE]
+            poly_cards = [card for card in fallback_cards if card.source == MarketSource.POLYMARKET]
+            fallback_cards = bayse_cards[:3] + poly_cards + bayse_cards[3:]
+
+        logger.info(
+            "Built fallback discovery feed with %s events for user %s in %s",
+            len(fallback_cards),
+            user_id,
+            currency.value,
+        )
+        return fallback_cards
 
     async def _get_cached_tracker_response(self, *, user_id: UUID, currency: Currency) -> list[TrackedEventRead] | None:
         if not self.live_state:
@@ -814,6 +1137,7 @@ class MarketServices:
             event_id=first_market.event_id,
             event_title=first_market.event_title,
             event_slug=first_market.event_slug,
+            event_icon_url=self._get_event_icon_url(markets=markets),
             source=first_market.source,
             currency=metric.currency if metric else currency,
             event_type=first_market.event_type,
@@ -867,35 +1191,33 @@ class MarketServices:
         currency: Currency,
         total_liquidity: float | None,
     ) -> TrackedEventMetric:
-        statement = select(TrackedEventMetric).where(
-            TrackedEventMetric.event_id == event_id,
-            TrackedEventMetric.source == source,
-            TrackedEventMetric.currency == currency,
-        )
-        result = await session.exec(statement)
-        existing = result.first()
-
-        if existing:
-            existing.total_liquidity = total_liquidity
-            existing.updated_at = datetime.now(timezone.utc)
-            session.add(existing)
-            logger.info(
-                "Updated tracked event metric for event %s source %s currency %s",
-                event_id,
-                source.value,
-                currency.value,
-            )
-            return existing
-
-        metric = TrackedEventMetric(
+        now = datetime.now(timezone.utc)
+        insert_stmt = pg_insert(TrackedEventMetric).values(
             event_id=event_id,
             source=source,
             currency=currency,
             total_liquidity=total_liquidity,
+            created_at=now,
+            updated_at=now,
         )
-        session.add(metric)
+        upsert_stmt = insert_stmt.on_conflict_do_update(
+            constraint="uq_tracked_event_metrics_event_source_currency",
+            set_={
+                "total_liquidity": insert_stmt.excluded.total_liquidity,
+                "updated_at": now,
+            },
+        )
+        await session.exec(upsert_stmt)
+        result = await session.exec(
+            select(TrackedEventMetric).where(
+                TrackedEventMetric.event_id == event_id,
+                TrackedEventMetric.source == source,
+                TrackedEventMetric.currency == currency,
+            )
+        )
+        metric = result.first()
         logger.info(
-            "Created tracked event metric for event %s source %s currency %s",
+            "Upserted tracked event metric for event %s source %s currency %s",
             event_id,
             source.value,
             currency.value,
@@ -923,23 +1245,87 @@ class MarketServices:
         session: AsyncSession,
         tracked_market: TrackedMarketCreate,
     ) -> TrackedMarket:
-        statement = select(TrackedMarket).where(TrackedMarket.market_id == tracked_market.market_id)
-        result = await session.exec(statement)
-        existing = result.first()
-
         data = tracked_market.model_dump()
-        if existing:
-            for key, value in data.items():
-                setattr(existing, key, value)
-            existing.updated_at = datetime.now(timezone.utc)
-            session.add(existing)
-            logger.info("Updated tracked market %s for event %s", existing.market_id, existing.event_id)
-            return existing
-
-        db_market = TrackedMarket(**data)
-        session.add(db_market)
-        logger.info("Created tracked market %s for event %s", db_market.market_id, db_market.event_id)
+        now = datetime.now(timezone.utc)
+        insert_stmt = pg_insert(TrackedMarket).values(
+            **data,
+            created_at=now,
+            updated_at=now,
+        )
+        update_data = {
+            key: insert_stmt.excluded[key]
+            for key in data.keys()
+            if key != "market_id"
+        }
+        update_data["updated_at"] = now
+        upsert_stmt = insert_stmt.on_conflict_do_update(
+            index_elements=[TrackedMarket.market_id],
+            set_=update_data,
+        )
+        await session.exec(upsert_stmt)
+        result = await session.exec(
+            select(TrackedMarket).where(TrackedMarket.market_id == tracked_market.market_id)
+        )
+        db_market = result.first()
+        logger.info(
+            "Single-market upserted tracked market %s for event %s",
+            db_market.market_id,
+            db_market.event_id,
+        )
         return db_market
+
+    async def _upsert_tracked_markets(
+        self,
+        session: AsyncSession,
+        tracked_markets: list[TrackedMarketCreate],
+        *,
+        overrides: dict | None = None,
+    ) -> list[TrackedMarket]:
+        if not tracked_markets:
+            return []
+
+        overrides = overrides or {}
+        now = datetime.now(timezone.utc)
+        rows = []
+        market_ids: list[str] = []
+        for tracked_market in tracked_markets:
+            row = tracked_market.model_dump()
+            row.update(overrides)
+            row["id"] = uuid4()
+            row["created_at"] = now
+            row["updated_at"] = now
+            rows.append(row)
+            market_ids.append(tracked_market.market_id)
+
+        insert_stmt = pg_insert(TrackedMarket).values(rows)
+        excluded_fields = [
+            field
+            for field in rows[0].keys()
+            if field not in {"id", "market_id", "created_at"}
+        ]
+        upsert_stmt = insert_stmt.on_conflict_do_update(
+            index_elements=[TrackedMarket.market_id],
+            set_={
+                **{field: insert_stmt.excluded[field] for field in excluded_fields},
+                "updated_at": now,
+            },
+        )
+        await session.exec(upsert_stmt)
+
+        persisted = (
+            await session.exec(
+                select(TrackedMarket).where(TrackedMarket.market_id.in_(market_ids))
+            )
+        ).all()
+        persisted_by_market_id = {market.market_id: market for market in persisted}
+        ordered = [persisted_by_market_id[market_id] for market_id in market_ids if market_id in persisted_by_market_id]
+        event_id = ordered[0].event_id if ordered else "unknown"
+        logger.info(
+            "Bulk upserted %s tracked markets for event %s",
+            len(ordered),
+            event_id,
+        )
+        return ordered
 
     async def track_event_for_user(
         self,
@@ -968,10 +1354,10 @@ class MarketServices:
             event_payload = await self.bayse.get_event_by_id(event_id=event_id, currency=currency)
             normalized = self.normalize_event_to_tracked_markets(event_payload, currency=currency)
 
-        persisted_markets: list[TrackedMarket] = []
-        for market in normalized.markets:
-            persisted_market = await self._upsert_tracked_market(session, market)
-            persisted_markets.append(persisted_market)
+        persisted_markets = await self._upsert_tracked_markets(
+            session,
+            normalized.markets,
+        )
 
         await self._upsert_event_metric(
             session,
@@ -1003,6 +1389,10 @@ class MarketServices:
             logger.info("Created user-tracked event row for user %s and event %s", user_id, normalized.event_id)
 
         await session.commit()
+        await self._refresh_subscription_plan_for_source(
+            session=session,
+            source=normalized.source,
+        )
 
         if self.baseline_services:
             try:
@@ -1086,14 +1476,14 @@ class MarketServices:
             event_payload = await self.bayse.get_event_by_id(event_id=event_id, currency=currency)
             normalized = self.normalize_event_to_tracked_markets(event_payload, currency=currency)
 
-        persisted_markets: list[TrackedMarket] = []
-        for market in normalized.markets:
-            persisted_market = await self._upsert_tracked_market(session, market)
-            persisted_market.is_system_tracked = True
-            persisted_market.tracking_enabled = True
-            persisted_market.updated_at = datetime.now(timezone.utc)
-            session.add(persisted_market)
-            persisted_markets.append(persisted_market)
+        persisted_markets = await self._upsert_tracked_markets(
+            session,
+            normalized.markets,
+            overrides={
+                "tracking_enabled": True,
+                "is_system_tracked": True,
+            },
+        )
 
         await self._upsert_event_metric(
             session,
@@ -1103,6 +1493,10 @@ class MarketServices:
             total_liquidity=normalized.total_liquidity,
         )
         await session.commit()
+        await self._refresh_subscription_plan_for_source(
+            session=session,
+            source=normalized.source,
+        )
 
         if self.baseline_services:
             try:
@@ -1195,6 +1589,10 @@ class MarketServices:
         user_tracking.updated_at = datetime.now(timezone.utc)
         session.add(user_tracking)
         await session.commit()
+        await self._refresh_subscription_plan_for_source(
+            session=session,
+            source=source,
+        )
 
         markets_statement = select(TrackedMarket).where(
             TrackedMarket.event_id == event_id,
@@ -1316,6 +1714,33 @@ class MarketServices:
         await self._set_cached_tracker_response(user_id=user_id, currency=currency, response=response)
         return response
 
+    async def list_tracked_events_page_for_user(
+        self,
+        *,
+        session: AsyncSession,
+        user_id: UUID,
+        currency: Currency = Currency.DOLLAR,
+        page: int = 1,
+        limit: int = 20,
+    ) -> tuple[list[TrackedEventRead], int]:
+        logger.info("Listing paginated tracked events for user %s in %s (page=%s, limit=%s)", user_id, currency.value, page, limit)
+
+        cached_response = await self._get_cached_tracker_response(user_id=user_id, currency=currency)
+        if cached_response is not None:
+            start = (page - 1) * limit
+            end = start + limit
+            return cached_response[start:end], len(cached_response)
+        full_response = await self.list_tracked_events_for_user(
+            session=session,
+            user_id=user_id,
+            currency=currency,
+        )
+        start = (page - 1) * limit
+        end = start + limit
+        page_items = full_response[start:end]
+        logger.info("Listed %s paginated tracked events for user %s (total=%s)", len(page_items), user_id, len(full_response))
+        return page_items, len(full_response)
+
     async def list_system_tracked_events(
         self,
         *,
@@ -1422,6 +1847,10 @@ class MarketServices:
             session.add(market)
 
         await session.commit()
+        await self._refresh_subscription_plan_for_source(
+            session=session,
+            source=source,
+        )
         first_market = markets[0]
         metric = await self._get_event_metric(
             session,
@@ -1581,7 +2010,9 @@ class MarketServices:
         user_id: UUID,
         source: MarketSource | None = None,
         currency: Currency = Currency.DOLLAR,
-    ) -> list[DiscoveryEventRead]:
+        page: int = 1,
+        limit: int | None = None,
+    ) -> tuple[list[DiscoveryEventRead], int]:
         logger.info("Fetching discovery feed for user %s in %s", user_id, currency.value)
 
         # Read the pre-built feed from Redis (written by DiscoveryWorker)
@@ -1591,28 +2022,120 @@ class MarketServices:
         ) if self.live_state else None
 
         if cached is None or not isinstance(cached, list):
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Discovery feed is warming up, please try again shortly",
+            logger.warning(
+                "Discovery feed cache unavailable for %s; building fallback response",
+                currency.value,
             )
+            build_locally = True
+            if self.live_state:
+                lock_acquired = await self.live_state.acquire_coordination_lock(
+                    namespace="discovery-feed-build",
+                    identifier=currency.value,
+                    ttl_seconds=self.DISCOVERY_FEED_BUILD_LOCK_TTL,
+                )
+                if not lock_acquired:
+                    warmed_cache = await self._wait_for_discovery_cache_fill(currency=currency)
+                    if warmed_cache is not None:
+                        cached = warmed_cache
+                        build_locally = False
+
+            if build_locally:
+                fallback_cards = await self._build_discovery_feed_fallback(
+                    session=session,
+                    user_id=user_id,
+                    source=source,
+                    currency=currency,
+                )
+                cached = [item.model_dump(mode="json") for item in fallback_cards]
+                if self.live_state:
+                    await self.live_state.set_read_model(
+                        namespace="discovery-feed",
+                        identifier=currency.value,
+                        payload=cached,
+                        ttl_seconds=self.DISCOVERY_FEED_CACHE_TTL,
+                    )
+
+        filtered_cached = [
+            item
+            for item in cached
+            if not source or item.get("source") == source.value
+        ]
+        total_count = len(filtered_cached)
+
+        if limit is not None:
+            start = max(page - 1, 0) * limit
+            end = start + limit
+            paged_cached = filtered_cached[start:end]
+        else:
+            paged_cached = filtered_cached
 
         # One fast DB query for user's tracked event IDs
         tracked_ids = await self._get_user_tracked_event_ids(session, user_id)
 
+        feed_event_ids = {
+            str(item.get("event_id"))
+            for item in paged_cached
+            if item.get("event_id")
+            and str(item.get("event_id")) in tracked_ids
+            and item.get("data_mode") != "tracked_live"
+        }
+        upgraded_cards: dict[tuple[str, str], DiscoveryEventRead] = {}
+
+        if feed_event_ids:
+            tracked_markets = (
+                await session.exec(
+                    select(TrackedMarket).where(
+                        TrackedMarket.event_id.in_(feed_event_ids),
+                        TrackedMarket.tracking_enabled == True,
+                    )
+                )
+            ).all()
+
+            grouped_markets: dict[tuple[str, MarketSource], list[TrackedMarket]] = {}
+            for market in tracked_markets:
+                grouped_markets.setdefault((market.event_id, market.source), []).append(market)
+
+            upgrade_tasks = []
+            upgrade_keys: list[tuple[str, str]] = []
+            for (event_id, market_source), event_markets in grouped_markets.items():
+                effective_currency = Currency.DOLLAR if market_source == MarketSource.POLYMARKET else currency
+                upgrade_keys.append((event_id, market_source.value))
+                upgrade_tasks.append(
+                    self._build_discovery_read_for_tracked_event(
+                        session=session,
+                        markets=event_markets,
+                        currency=effective_currency,
+                        tracking_enabled=True,
+                    )
+                )
+
+            if upgrade_tasks:
+                upgraded_results = await asyncio.gather(*upgrade_tasks, return_exceptions=True)
+                for key, result in zip(upgrade_keys, upgraded_results, strict=False):
+                    if isinstance(result, Exception):
+                        logger.warning("Failed to upgrade tracked discovery card for %s", key[0], exc_info=True)
+                        continue
+                    upgraded_cards[key] = result
+
         # Overlay per-user tracking status and build response
         discovery: list[DiscoveryEventRead] = []
-        for item in cached:
-            if source and item.get("source") != source.value:
+        for item in paged_cached:
+            event_id = str(item.get("event_id") or "")
+            source_value = str(item.get("source") or "")
+            upgraded = upgraded_cards.get((event_id, source_value))
+            if upgraded is not None:
+                discovery.append(upgraded)
                 continue
-            item["tracking_enabled"] = item.get("event_id") in tracked_ids
+
+            item["tracking_enabled"] = event_id in tracked_ids
             try:
                 discovery.append(DiscoveryEventRead.model_validate(item))
             except Exception:
                 logger.warning("Discovery worker card validation failed for %s", item.get("event_id"))
                 continue
 
-        logger.info("Discovery feed contains %s events for user %s", len(discovery), user_id)
-        return discovery
+        logger.info("Discovery feed contains %s events for user %s", total_count, user_id)
+        return discovery, total_count
 
     async def get_discovery_feed_for_system(
         self,
@@ -1620,7 +2143,9 @@ class MarketServices:
         session: AsyncSession,
         source: MarketSource | None = None,
         currency: Currency = Currency.DOLLAR,
-    ) -> list[DiscoveryEventRead]:
+        page: int = 1,
+        limit: int | None = None,
+    ) -> tuple[list[DiscoveryEventRead], int]:
         logger.info("Fetching system discovery feed in %s", currency.value)
 
         # Read the pre-built feed from Redis (written by DiscoveryWorker)
@@ -1630,10 +2155,38 @@ class MarketServices:
         ) if self.live_state else None
 
         if cached is None or not isinstance(cached, list):
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Discovery feed is warming up, please try again shortly",
+            logger.warning(
+                "Admin discovery feed cache unavailable for %s; building fallback response",
+                currency.value,
             )
+            build_locally = True
+            if self.live_state:
+                lock_acquired = await self.live_state.acquire_coordination_lock(
+                    namespace="discovery-feed-build",
+                    identifier=currency.value,
+                    ttl_seconds=self.DISCOVERY_FEED_BUILD_LOCK_TTL,
+                )
+                if not lock_acquired:
+                    warmed_cache = await self._wait_for_discovery_cache_fill(currency=currency)
+                    if warmed_cache is not None:
+                        cached = warmed_cache
+                        build_locally = False
+
+            if build_locally:
+                fallback_cards = await self._build_discovery_feed_fallback(
+                    session=session,
+                    user_id=None,
+                    source=source,
+                    currency=currency,
+                )
+                cached = [item.model_dump(mode="json") for item in fallback_cards]
+                if self.live_state:
+                    await self.live_state.set_read_model(
+                        namespace="discovery-feed",
+                        identifier=currency.value,
+                        payload=cached,
+                        ttl_seconds=self.DISCOVERY_FEED_CACHE_TTL,
+                    )
 
         # One fast DB query for system-tracked event IDs
         system_result = await session.exec(
@@ -1644,11 +2197,23 @@ class MarketServices:
         )
         system_tracked_ids = set(system_result.all())
 
+        filtered_cached = [
+            item
+            for item in cached
+            if not source or item.get("source") == source.value
+        ]
+        total_count = len(filtered_cached)
+
+        if limit is not None:
+            start = max(page - 1, 0) * limit
+            end = start + limit
+            paged_cached = filtered_cached[start:end]
+        else:
+            paged_cached = filtered_cached
+
         # Overlay system tracking status and build response
         discovery: list[DiscoveryEventRead] = []
-        for item in cached:
-            if source and item.get("source") != source.value:
-                continue
+        for item in paged_cached:
             item["tracking_enabled"] = item.get("event_id") in system_tracked_ids
             try:
                 discovery.append(DiscoveryEventRead.model_validate(item))
@@ -1656,5 +2221,5 @@ class MarketServices:
                 logger.warning("System discovery card validation failed for %s", item.get("event_id"))
                 continue
 
-        logger.info("System discovery feed contains %s events", len(discovery))
-        return discovery
+        logger.info("System discovery feed contains %s events", total_count)
+        return discovery, total_count

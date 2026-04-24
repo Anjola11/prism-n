@@ -28,7 +28,7 @@ export function SignupPage() {
 
     try {
       const user = await authApi.register(formData.email, formData.password, formData.confirm);
-      navigate({ to: '/auth/otp', search: { email: formData.email, uid: user.uid } });
+      navigate({ to: '/auth/otp', search: { email: formData.email, uid: user.uid, type: 'signup' } });
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Failed to create account. Please try again.');
     } finally {

@@ -17,6 +17,8 @@ from src.markets.live_state import (
     EventLiveState,
     LiveStateServices,
     MarketLiveState,
+    PolymarketSubscriptionPlan,
+    PolymarketAssetBindingState,
     SubscriptionLiveState,
 )
 from src.markets.models import Currency, MarketEngine, MarketSource, TrackedEventMetric, TrackedMarket, UserTrackedEvent
@@ -78,6 +80,7 @@ class PolymarketWebSocketManager:
         self._last_connect_at: str | None = None
         self._reconnect_count: int = 0
         self._last_error: str | None = None
+        self._last_subscription_plan_version: str | None = None
 
     async def start(self) -> None:
         if self._task and not self._task.done():
@@ -210,7 +213,9 @@ class PolymarketWebSocketManager:
         if not self._ws:
             return
 
-        desired_bindings = await self._load_tracked_asset_bindings()
+        desired_bindings, plan_version = await self._load_tracked_asset_bindings()
+        if plan_version == self._last_subscription_plan_version and self._active_asset_ids:
+            return
         desired_asset_ids = set(desired_bindings)
 
         self._asset_bindings = desired_bindings
@@ -271,8 +276,40 @@ class PolymarketWebSocketManager:
             len(desired_asset_ids),
             len(self._active_asset_ids),
         )
+        self._last_subscription_plan_version = plan_version
 
-    async def _load_tracked_asset_bindings(self) -> dict[str, AssetBinding]:
+    async def _load_tracked_asset_bindings(self) -> tuple[dict[str, AssetBinding], str]:
+        cached_plan = await self.live_state.get_subscription_plan(identifier=MarketSource.POLYMARKET.value)
+        if cached_plan is not None:
+            try:
+                plan = PolymarketSubscriptionPlan.model_validate(cached_plan)
+                return self._bindings_from_subscription_plan(plan), plan.version
+            except Exception:
+                logger.warning("Invalid Polymarket subscription plan in Redis; rebuilding", exc_info=True)
+
+        plan = await self._build_subscription_plan_from_db()
+        await self.live_state.set_subscription_plan(
+            identifier=MarketSource.POLYMARKET.value,
+            payload=plan,
+        )
+        return self._bindings_from_subscription_plan(plan), plan.version
+
+    def _bindings_from_subscription_plan(self, plan: PolymarketSubscriptionPlan) -> dict[str, AssetBinding]:
+        bindings: dict[str, AssetBinding] = {}
+        for binding in plan.bindings:
+            try:
+                bindings[binding.asset_id] = AssetBinding(
+                    asset_id=binding.asset_id,
+                    event_id=binding.event_id,
+                    market_id=binding.market_id,
+                    currency=Currency(binding.currency),
+                    outcome_side=binding.outcome_side,
+                )
+            except ValueError:
+                logger.warning("Skipping unsupported Polymarket binding currency %s", binding.currency)
+        return bindings
+
+    async def _build_subscription_plan_from_db(self) -> PolymarketSubscriptionPlan:
         async with async_session_maker() as session:
             tracked_event_ids = set(
                 await session.exec(
@@ -298,33 +335,50 @@ class PolymarketWebSocketManager:
                 )
             ).all()
 
-        bindings: dict[str, AssetBinding] = {}
+        bindings: list[PolymarketAssetBindingState] = []
         for market in tracked_markets:
-            bindings[market.yes_outcome_id] = AssetBinding(
-                asset_id=market.yes_outcome_id,
-                event_id=market.event_id,
-                market_id=market.market_id,
-                currency=Currency.DOLLAR,
-                outcome_side="YES",
+            bindings.append(
+                PolymarketAssetBindingState(
+                    asset_id=market.yes_outcome_id,
+                    event_id=market.event_id,
+                    market_id=market.market_id,
+                    currency=Currency.DOLLAR.value,
+                    outcome_side="YES",
+                )
             )
-            bindings[market.no_outcome_id] = AssetBinding(
-                asset_id=market.no_outcome_id,
-                event_id=market.event_id,
-                market_id=market.market_id,
-                currency=Currency.DOLLAR,
-                outcome_side="NO",
+            bindings.append(
+                PolymarketAssetBindingState(
+                    asset_id=market.no_outcome_id,
+                    event_id=market.event_id,
+                    market_id=market.market_id,
+                    currency=Currency.DOLLAR.value,
+                    outcome_side="NO",
+                )
             )
-        return bindings
+        return PolymarketSubscriptionPlan(bindings=bindings)
 
     async def _handle_raw_frame(self, raw_frame: str) -> None:
         if raw_frame == "PONG":
             return
         try:
-            message = json.loads(raw_frame)
+            payload = json.loads(raw_frame)
         except json.JSONDecodeError:
             logger.warning("Failed to decode Polymarket websocket frame: %s", raw_frame)
             return
-        await self._handle_message(message)
+
+        if isinstance(payload, list):
+            for item in payload:
+                if not isinstance(item, dict):
+                    logger.info("Ignoring unsupported Polymarket websocket list item type %s", type(item).__name__)
+                    continue
+                await self._handle_message(item)
+            return
+
+        if not isinstance(payload, dict):
+            logger.info("Ignoring unsupported Polymarket websocket payload type %s", type(payload).__name__)
+            return
+
+        await self._handle_message(payload)
 
     async def _handle_message(self, message: dict[str, Any]) -> None:
         self._last_message_at = datetime.now(timezone.utc).isoformat()
@@ -567,7 +621,7 @@ class PolymarketWebSocketManager:
         return sigma
 
     async def _resync_tracked_markets_from_rest(self) -> None:
-        bindings = await self._load_tracked_asset_bindings()
+        bindings, _ = await self._load_tracked_asset_bindings()
         self._asset_bindings = bindings
         if not bindings:
             return
@@ -605,54 +659,64 @@ class PolymarketWebSocketManager:
                     live_volume_map[event_id] = None
 
         for market in tracked_markets:
-            metric = event_metric_map.get(market.event_id)
-            live_volume = live_volume_map.get(market.event_id)
-            await self.live_state.warm_event_state_from_tracking(
-                tracked_market=market,
-                currency=Currency.DOLLAR,
-                total_liquidity=metric.total_liquidity if metric else None,
-                tracked_markets_count=1,
-            )
-            await self.live_state.update_event_state(
-                source=MarketSource.POLYMARKET,
-                event_id=market.event_id,
-                currency=Currency.DOLLAR,
-                event_total_orders=int(live_volume) if live_volume is not None else market.event_total_orders,
-            )
-            await self.live_state.warm_market_state_from_tracking(
-                tracked_market=market,
-                currency=Currency.DOLLAR,
-                total_liquidity=metric.total_liquidity if metric else None,
-            )
+            try:
+                metric = event_metric_map.get(market.event_id)
+                live_volume = live_volume_map.get(market.event_id)
+                await self.live_state.warm_event_state_from_tracking(
+                    tracked_market=market,
+                    currency=Currency.DOLLAR,
+                    total_liquidity=metric.total_liquidity if metric else None,
+                    tracked_markets_count=1,
+                )
+                await self.live_state.update_event_state(
+                    source=MarketSource.POLYMARKET,
+                    event_id=market.event_id,
+                    currency=Currency.DOLLAR,
+                    event_total_orders=int(live_volume) if live_volume is not None else market.event_total_orders,
+                )
+                await self.live_state.warm_market_state_from_tracking(
+                    tracked_market=market,
+                    currency=Currency.DOLLAR,
+                    total_liquidity=metric.total_liquidity if metric else None,
+                )
 
-            yes_book = book_map.get(market.yes_outcome_id)
-            no_book = book_map.get(market.no_outcome_id)
+                yes_book = book_map.get(market.yes_outcome_id)
+                no_book = book_map.get(market.no_outcome_id)
+                yes_bids = (yes_book or {}).get("bids") or []
+                yes_asks = (yes_book or {}).get("asks") or []
 
-            current_probability = self.clob.midpoint_from_book(yes_book)
-            inverse_probability = self.clob.midpoint_from_book(no_book)
-            if current_probability is None and inverse_probability is not None:
-                current_probability = 1 - inverse_probability
-            if inverse_probability is None and current_probability is not None:
-                inverse_probability = 1 - current_probability
+                current_probability = self.clob.midpoint_from_book(yes_book)
+                inverse_probability = self.clob.midpoint_from_book(no_book)
+                if current_probability is None and inverse_probability is not None:
+                    current_probability = 1 - inverse_probability
+                if inverse_probability is None and current_probability is not None:
+                    inverse_probability = 1 - current_probability
 
-            await self.live_state.update_market_state(
-                source=MarketSource.POLYMARKET,
-                market_id=market.market_id,
-                currency=Currency.DOLLAR,
-                current_probability=current_probability,
-                inverse_probability=inverse_probability,
-                event_liquidity=metric.total_liquidity if metric else None,
-                market_total_orders=market.market_total_orders,
-                event_total_orders=int(live_volume) if live_volume is not None else market.event_total_orders,
-                top_bid_depth=self.clob.level_total((yes_book or {}).get("bids", [None])[0]) if yes_book else 0.0,
-                top_ask_depth=self.clob.level_total((yes_book or {}).get("asks", [None])[0]) if yes_book else 0.0,
-                top_5_bid_depth=sum(self.clob.level_total(level) for level in (yes_book or {}).get("bids", [])[:5]),
-                top_5_ask_depth=sum(self.clob.level_total(level) for level in (yes_book or {}).get("asks", [])[:5]),
-                spread_bps=self.clob.spread_bps_from_book(yes_book),
-                orderbook_supported=True,
-                ticker_supported=True,
-            )
-            await self._score_market(market_id=market.market_id, currency=Currency.DOLLAR)
+                await self.live_state.update_market_state(
+                    source=MarketSource.POLYMARKET,
+                    market_id=market.market_id,
+                    currency=Currency.DOLLAR,
+                    current_probability=current_probability,
+                    inverse_probability=inverse_probability,
+                    event_liquidity=metric.total_liquidity if metric else None,
+                    market_total_orders=market.market_total_orders,
+                    event_total_orders=int(live_volume) if live_volume is not None else market.event_total_orders,
+                    top_bid_depth=self.clob.level_total(yes_bids[0]) if yes_bids else 0.0,
+                    top_ask_depth=self.clob.level_total(yes_asks[0]) if yes_asks else 0.0,
+                    top_5_bid_depth=sum(self.clob.level_total(level) for level in yes_bids[:5]),
+                    top_5_ask_depth=sum(self.clob.level_total(level) for level in yes_asks[:5]),
+                    spread_bps=self.clob.spread_bps_from_book(yes_book),
+                    orderbook_supported=True,
+                    ticker_supported=True,
+                )
+                await self._score_market(market_id=market.market_id, currency=Currency.DOLLAR)
+            except Exception:
+                logger.warning(
+                    "Failed to resync Polymarket market %s for event %s during reconnect",
+                    market.market_id,
+                    market.event_id,
+                    exc_info=True,
+                )
 
     async def _mark_active_subscriptions_inactive(self) -> None:
         for asset_id, binding in list(self._asset_bindings.items()):

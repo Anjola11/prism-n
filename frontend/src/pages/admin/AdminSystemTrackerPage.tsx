@@ -1,24 +1,33 @@
 import React from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 
 import { adminApi } from '../../lib/api/admin';
 import { mapDiscoveryEvent } from '../../lib/api/adapters';
 import type { DiscoveryCardViewModel } from '../../lib/api/types';
+import { DEFAULT_PAGE_SIZE } from '../../lib/constants';
 import { SignalCard } from '../../components/ui/SignalCard';
+import { useInfiniteScrollSentinel } from '../../hooks/useInfiniteScrollSentinel';
 
 export function AdminSystemTrackerPage() {
+  const [tracked, setTracked] = React.useState<Record<string, boolean>>({});
+  const [pendingByEvent, setPendingByEvent] = React.useState<Record<string, boolean>>({});
   const queryClient = useQueryClient();
 
-  const systemTrackerQuery = useQuery({
-    queryKey: ['admin-system-tracker'],
-    queryFn: async () => {
-      const response = await adminApi.getSystemTracker();
-      return response.map(mapDiscoveryEvent);
+  const systemTrackerQuery = useInfiniteQuery({
+    queryKey: ['admin-system-tracker', DEFAULT_PAGE_SIZE],
+    queryFn: ({ pageParam }) => {
+      return adminApi.getSystemTrackerPage(pageParam, DEFAULT_PAGE_SIZE);
+    },
+    initialPageParam: 1,
+    getNextPageParam: (lastPage) => {
+      if (!lastPage.pagination.has_more) {
+        return undefined;
+      }
+      return lastPage.pagination.page + 1;
     },
     staleTime: 30_000,
     gcTime: 5 * 60_000,
     refetchInterval: 30_000,
-    placeholderData: (previousData) => previousData,
   });
 
   const toggleMutation = useMutation({
@@ -37,13 +46,47 @@ export function AdminSystemTrackerPage() {
     },
   });
 
-  const events = systemTrackerQuery.data || [];
+  const events: DiscoveryCardViewModel[] =
+    systemTrackerQuery.data?.pages.flatMap((page) => page.items.map(mapDiscoveryEvent)) || [];
+
+  React.useEffect(() => {
+    if (events.length > 0) {
+      setTracked((prev) => {
+        const next = Object.fromEntries(events.map((event) => [event.id, !!event.trackingEnabled]));
+        const prevKeys = Object.keys(prev);
+        const nextKeys = Object.keys(next);
+        const isUnchanged =
+          prevKeys.length === nextKeys.length &&
+          nextKeys.every((key) => prev[key] === next[key]);
+        return isUnchanged ? prev : next;
+      });
+    }
+  }, [events]);
+
+  const loadMoreRef = useInfiniteScrollSentinel({
+    hasNextPage: !!systemTrackerQuery.hasNextPage,
+    isFetchingNextPage: systemTrackerQuery.isFetchingNextPage,
+    fetchNextPage: systemTrackerQuery.fetchNextPage,
+    enabled: !systemTrackerQuery.isLoading,
+  });
 
   const toggleSystemTrack = async (e: React.MouseEvent, eventId: string, source: string) => {
     e.stopPropagation();
-    const current = events.find((event) => event.id === eventId);
-    const shouldTrack = !current?.trackingEnabled;
-    await toggleMutation.mutateAsync({ eventId, shouldTrack, source });
+    if (pendingByEvent[eventId]) {
+      return;
+    }
+
+    const shouldTrack = !tracked[eventId];
+    setPendingByEvent((prev) => ({ ...prev, [eventId]: true }));
+    setTracked((prev) => ({ ...prev, [eventId]: shouldTrack }));
+
+    try {
+      await toggleMutation.mutateAsync({ eventId, shouldTrack, source });
+    } catch {
+      setTracked((prev) => ({ ...prev, [eventId]: !shouldTrack }));
+    } finally {
+      setPendingByEvent((prev) => ({ ...prev, [eventId]: false }));
+    }
   };
 
   return (
@@ -69,7 +112,8 @@ export function AdminSystemTrackerPage() {
           <SignalCard
             key={event.id}
             event={event}
-            isTracked={!!event.trackingEnabled}
+            isTracked={!!tracked[event.id]}
+            isTrackPending={!!pendingByEvent[event.id]}
             onTrack={toggleSystemTrack}
           />
         ))}
@@ -78,6 +122,14 @@ export function AdminSystemTrackerPage() {
           <p className="text-sm text-text-muted">No events are currently being system-tracked.</p>
         )}
       </div>
+
+      {!systemTrackerQuery.isLoading && events.length > 0 && (
+        <div ref={loadMoreRef} className="flex min-h-10 items-center justify-center">
+          {systemTrackerQuery.isFetchingNextPage && (
+            <span className="font-mono text-xs text-text-muted">Loading more tracked events...</span>
+          )}
+        </div>
+      )}
     </div>
   );
 }

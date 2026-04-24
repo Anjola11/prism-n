@@ -1,35 +1,62 @@
-import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useInfiniteQuery } from '@tanstack/react-query';
 import gsap from 'gsap';
 
 import { marketsApi } from '../../lib/api/markets';
 import { mapDiscoveryEvent } from '../../lib/api/adapters';
 import type { DiscoveryCardViewModel } from '../../lib/api/types';
+import { DEFAULT_PAGE_SIZE } from '../../lib/constants';
 import { SignalCard } from '../../components/ui/SignalCard';
+import { useInfiniteScrollSentinel } from '../../hooks/useInfiniteScrollSentinel';
 
 export function TrackerPage() {
   const container = useRef<HTMLDivElement>(null);
-  const queryClient = useQueryClient();
+  const hasAnimatedRef = useRef(false);
+  const previousEventIdsRef = useRef<string[]>([]);
   const [tracked, setTracked] = useState<Record<string, boolean>>({});
   const [syncTimer, setSyncTimer] = useState(12);
-  const trackerQuery = useQuery({
-    queryKey: ['tracker-feed'],
-    queryFn: async () => {
-      const apiEvents = await marketsApi.getTracker();
-      return apiEvents.map(mapDiscoveryEvent);
+  const trackerQuery = useInfiniteQuery({
+    queryKey: ['tracker-feed', DEFAULT_PAGE_SIZE],
+    queryFn: ({ pageParam }) => {
+      return marketsApi.getTrackerPage(pageParam, DEFAULT_PAGE_SIZE);
+    },
+    initialPageParam: 1,
+    getNextPageParam: (lastPage) => {
+      if (!lastPage.pagination.has_more) {
+        return undefined;
+      }
+      return lastPage.pagination.page + 1;
     },
     staleTime: 15_000,
     gcTime: 5 * 60_000,
     refetchInterval: 30_000,
-    placeholderData: (previousData) => previousData,
     retry: 2,
   });
 
-  const events: DiscoveryCardViewModel[] = trackerQuery.data || [];
+  const events: DiscoveryCardViewModel[] = useMemo(
+    () => trackerQuery.data?.pages.flatMap((page) => page.items.map(mapDiscoveryEvent)) || [],
+    [trackerQuery.data],
+  );
+
+  const loadMoreRef = useInfiniteScrollSentinel({
+    hasNextPage: !!trackerQuery.hasNextPage,
+    isFetchingNextPage: trackerQuery.isFetchingNextPage,
+    fetchNextPage: trackerQuery.fetchNextPage,
+    enabled: !trackerQuery.isLoading,
+  });
 
   useEffect(() => {
     if (events.length > 0) {
-      setTracked(Object.fromEntries(events.map((event) => [event.id, true])));
+      setTracked((prev) => {
+        const next = Object.fromEntries(events.map((event) => [event.id, true]));
+        const prevKeys = Object.keys(prev);
+        const nextKeys = Object.keys(next);
+        const isUnchanged =
+          prevKeys.length === nextKeys.length &&
+          nextKeys.every((key) => prev[key] === next[key]);
+
+        return isUnchanged ? prev : next;
+      });
     }
   }, [events]);
 
@@ -43,6 +70,8 @@ export function TrackerPage() {
 
   useLayoutEffect(() => {
     if (events.length === 0) return;
+    if (hasAnimatedRef.current) return;
+    hasAnimatedRef.current = true;
 
     const ctx = gsap.context(() => {
       gsap.fromTo(
@@ -62,6 +91,40 @@ export function TrackerPage() {
     return () => ctx.revert();
   }, [events]);
 
+  useLayoutEffect(() => {
+    if (!container.current || events.length === 0) {
+      previousEventIdsRef.current = events.map((event) => event.id);
+      return;
+    }
+
+    const previousIds = previousEventIdsRef.current;
+    const currentIds = events.map((event) => event.id);
+    const newIds = currentIds.filter((id) => !previousIds.includes(id));
+
+    if (previousIds.length > 0 && newIds.length > 0) {
+      const newNodes = newIds
+        .map((id) => container.current?.querySelector(`.event-card-wrapper[data-event-id="${id}"]`))
+        .filter((node): node is Element => node !== null);
+
+      if (newNodes.length > 0) {
+        gsap.fromTo(
+          newNodes,
+          { opacity: 0, y: 10 },
+          {
+            opacity: 1,
+            y: 0,
+            duration: 0.28,
+            stagger: 0.04,
+            ease: 'power2.out',
+            clearProps: 'all',
+          },
+        );
+      }
+    }
+
+    previousEventIdsRef.current = currentIds;
+  }, [events]);
+
   const toggleTrack = async (e: React.MouseEvent, id: string, source: string) => {
     e.stopPropagation();
 
@@ -73,9 +136,7 @@ export function TrackerPage() {
         await marketsApi.trackEvent(id, undefined, source);
       } else {
         await marketsApi.untrackEvent(id, undefined, source);
-        queryClient.setQueryData<DiscoveryCardViewModel[] | undefined>(['tracker-feed'], (prev) =>
-          (prev || []).filter((event) => event.id !== id),
-        );
+        await trackerQuery.refetch();
       }
     } catch (err) {
         console.error('Tracking action failed', err);
@@ -111,7 +172,7 @@ export function TrackerPage() {
         ))}
 
         {!trackerQuery.isLoading && events.map((event) => (
-          <div key={event.id} className="event-card-wrapper h-full">
+          <div key={event.id} className="event-card-wrapper h-full" data-event-id={event.id}>
             <SignalCard event={event} onTrack={toggleTrack} isTracked={!!tracked[event.id]} />
           </div>
         ))}
@@ -120,6 +181,14 @@ export function TrackerPage() {
           <p className="mt-4 text-sm text-text-muted">You are not tracking any events yet.</p>
         )}
       </div>
+
+      {!trackerQuery.isLoading && events.length > 0 && (
+        <div ref={loadMoreRef} className="flex min-h-10 items-center justify-center">
+          {trackerQuery.isFetchingNextPage && (
+            <span className="font-mono text-xs text-text-muted">Loading more tracked events...</span>
+          )}
+        </div>
+      )}
     </div>
   );
 }

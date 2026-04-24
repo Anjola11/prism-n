@@ -4,6 +4,18 @@ export interface ApiResponse<T> {
   data: T;
 }
 
+export interface PaginationMeta {
+  page: number;
+  limit: number;
+  total: number;
+  has_more: boolean;
+}
+
+export interface PaginatedResponse<T> {
+  items: T[];
+  pagination: PaginationMeta;
+}
+
 export interface AuthUserApi {
   uid: string;
   email: string | null;

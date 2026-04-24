@@ -11,6 +11,7 @@ export function OTPPage() {
   const search = routerState.location.search as any;
   const email = search?.email || 'user@example.com';
   const uid = search?.uid || '';
+  const type = search?.type || 'signup';
   const [otp, setOtp] = useState('');
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -25,10 +26,18 @@ export function OTPPage() {
       setNotice('');
       try {
         if (!uid) {
-          throw new Error('Signup session missing. Please sign up again.');
+          throw new Error('Session missing. Please try again.');
         }
-        await authApi.verifyOTP(uid, otp, 'signup');
-        navigate({ to: '/app' });
+        const result = await authApi.verifyOTP(uid, otp, type as 'signup' | 'forgotpassword');
+        
+        if (type === 'forgotpassword') {
+          navigate({ 
+            to: '/auth/reset-password', 
+            search: { reset_token: result.reset_token } 
+          });
+        } else {
+          navigate({ to: '/app' });
+        }
       } catch (err: any) {
         setError(err.response?.data?.detail || 'Invalid OTP or verification failed.');
       } finally {
@@ -39,7 +48,7 @@ export function OTPPage() {
 
   const handleResend = async () => {
     if (!email) {
-      setError('Signup session missing. Please sign up again.');
+      setError('Session missing. Please try again.');
       return;
     }
 
@@ -47,7 +56,7 @@ export function OTPPage() {
     setError('');
     setNotice('');
     try {
-      await authApi.resendOTP(email, 'signup');
+      await authApi.resendOTP(email, type as 'signup' | 'forgotpassword');
       setNotice('A new OTP has been sent to your email.');
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Failed to resend OTP.');

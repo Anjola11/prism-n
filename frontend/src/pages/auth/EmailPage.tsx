@@ -10,7 +10,7 @@ export function EmailPage() {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (email) {
-      navigate({ to: '/auth/otp', search: { email, uid: '' } });
+      navigate({ to: '/auth/otp', search: { email, uid: '', type: 'forgotpassword' } });
     }
   };
 

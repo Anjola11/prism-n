@@ -9,10 +9,12 @@ interface SignalCardProps {
   event: DiscoveryCardViewModel;
   onTrack?: (e: React.MouseEvent, id: string, source: string) => void;
   isTracked?: boolean;
+  isTrackPending?: boolean;
 }
 
-export function SignalCard({ event, onTrack, isTracked = false }: SignalCardProps) {
+export function SignalCard({ event, onTrack, isTracked = false, isTrackPending = false }: SignalCardProps) {
   const navigate = useNavigate();
+  const [iconFailed, setIconFailed] = React.useState(false);
   const topMarket = event.highestScoringMarket;
   const signal = topMarket?.signal;
 
@@ -60,6 +62,7 @@ export function SignalCard({ event, onTrack, isTracked = false }: SignalCardProp
   };
 
   const iconFallback = event.source === 'POLYMARKET' ? 'P' : 'B';
+  const shouldShowImage = !!event.iconUrl && !iconFailed;
 
   return (
     <div
@@ -77,12 +80,13 @@ export function SignalCard({ event, onTrack, isTracked = false }: SignalCardProp
 
       <div className="relative z-10 mb-2 flex items-start gap-3 pr-2">
         <div className="mt-0.5 flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-xl border border-border/60 bg-navy shadow-sm">
-          {event.iconUrl ? (
+          {shouldShowImage ? (
             <img
-              src={event.iconUrl}
+              src={event.iconUrl ?? undefined}
               alt=""
               className="h-full w-full object-cover"
               loading="lazy"
+              onError={() => setIconFailed(true)}
             />
           ) : (
             <span className="font-mono text-sm font-bold text-text-secondary">{iconFallback}</span>
@@ -143,13 +147,16 @@ export function SignalCard({ event, onTrack, isTracked = false }: SignalCardProp
         <div className="mt-1 flex w-full justify-end">
           <button
             onClick={(e) => onTrack?.(e, event.id, event.source.toLowerCase())}
+            disabled={isTrackPending}
             className={`flex items-center gap-1 rounded px-3 py-1.5 font-mono text-[10px] transition-all ${
-              isTracked
+              isTrackPending
+                ? 'cursor-not-allowed border border-border bg-card text-text-muted'
+                : isTracked
                 ? 'border border-emerald-400/20 bg-emerald-400/10 text-emerald-400'
                 : 'border border-prism-blue/20 bg-prism-blue/10 text-prism-blue hover:bg-prism-blue/20'
             }`}
           >
-            {isTracked ? <><Check size={12} /> TRACKED</> : <><Plus size={12} /> TRACK</>}
+            {isTrackPending ? 'WORKING...' : isTracked ? <><Check size={12} /> TRACKED</> : <><Plus size={12} /> TRACK</>}
           </button>
         </div>
       </div>

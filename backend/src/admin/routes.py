@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Request, Response, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from src.admin.schemas import AdminLoginInput
@@ -15,6 +15,26 @@ from src.utils.responses import success_response
 
 
 admin_router = APIRouter()
+
+
+def _build_paginated_payload(items: list, *, page: int, limit: int, total: int | None = None) -> dict:
+    if total is None:
+        total = len(items)
+        start = (page - 1) * limit
+        end = start + limit
+        paginated_items = items[start:end]
+    else:
+        paginated_items = items
+        end = page * limit
+    return {
+        "items": paginated_items,
+        "pagination": {
+            "page": page,
+            "limit": limit,
+            "total": total,
+            "has_more": end < total,
+        },
+    }
 
 
 def get_admin_services(
@@ -113,19 +133,28 @@ async def admin_overview(
 async def admin_discovery(
     source: MarketSource | None = None,
     currency: Currency = Currency.DOLLAR,
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=20, ge=1, le=100),
     session: AsyncSession = Depends(get_session),
     market_services: MarketServices = Depends(get_market_services),
     admin_user_id=Depends(get_admin_user_id),
 ):
     logger.info("Admin discovery requested by %s in %s", admin_user_id, currency.value)
-    result = await market_services.get_discovery_feed_for_system(
+    result, total_count = await market_services.get_discovery_feed_for_system(
         session=session,
         source=source,
         currency=currency,
+        page=page,
+        limit=limit,
     )
     return success_response(
         message="Admin discovery fetched successfully",
-        data=[item.model_dump() for item in result],
+        data=_build_paginated_payload(
+            [item.model_dump() for item in result],
+            page=page,
+            limit=limit,
+            total=total_count,
+        ),
     )
 
 
@@ -136,6 +165,8 @@ async def admin_discovery(
 )
 async def admin_system_tracker(
     currency: Currency = Currency.DOLLAR,
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=20, ge=1, le=100),
     session: AsyncSession = Depends(get_session),
     market_services: MarketServices = Depends(get_market_services),
     admin_user_id=Depends(get_admin_user_id),
@@ -147,7 +178,11 @@ async def admin_system_tracker(
     )
     return success_response(
         message="System tracked events fetched successfully",
-        data=[item.model_dump() for item in result],
+        data=_build_paginated_payload(
+            [item.model_dump() for item in result],
+            page=page,
+            limit=limit,
+        ),
     )
 
 

@@ -1,25 +1,40 @@
 import React, { useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { Filter } from 'lucide-react';
 
 import { adminApi } from '../../lib/api/admin';
 import { mapDiscoveryEvent } from '../../lib/api/adapters';
 import type { DiscoveryCardViewModel } from '../../lib/api/types';
+import { DEFAULT_PAGE_SIZE } from '../../lib/constants';
 import { SignalCard } from '../../components/ui/SignalCard';
+import { useInfiniteScrollSentinel } from '../../hooks/useInfiniteScrollSentinel';
 
 export function AdminDiscoveryPage() {
   const [filter, setFilter] = useState<'ALL' | 'BAYSE' | 'POLYMARKET'>('ALL');
+  const [tracked, setTracked] = useState<Record<string, boolean>>({});
+  const [pendingByEvent, setPendingByEvent] = useState<Record<string, boolean>>({});
   const queryClient = useQueryClient();
 
-  const discoveryQuery = useQuery({
-    queryKey: ['admin-discovery', filter],
-    queryFn: async () => {
-      const response = await adminApi.getDiscovery(undefined, filter === 'ALL' ? undefined : filter.toLowerCase());
-      return response.map(mapDiscoveryEvent);
+  const discoveryQuery = useInfiniteQuery({
+    queryKey: ['admin-discovery', filter, DEFAULT_PAGE_SIZE],
+    queryFn: ({ pageParam }) => {
+      return adminApi.getDiscoveryPage(pageParam, DEFAULT_PAGE_SIZE, undefined, filter === 'ALL' ? undefined : filter.toLowerCase());
+    },
+    initialPageParam: 1,
+    getNextPageParam: (lastPage) => {
+      if (!lastPage.pagination.has_more) {
+        return undefined;
+      }
+      return lastPage.pagination.page + 1;
     },
     staleTime: 30_000,
     gcTime: 5 * 60_000,
     refetchInterval: 30_000,
-    placeholderData: (previousData) => previousData,
+    retry: (failureCount, error) => {
+      if ((error as any)?.response?.status === 503 && failureCount < 5) return true;
+      return failureCount < 2;
+    },
+    retryDelay: (attemptIndex) => Math.min(3000 * (attemptIndex + 1), 10000),
   });
 
   const toggleMutation = useMutation({
@@ -38,13 +53,49 @@ export function AdminDiscoveryPage() {
     },
   });
 
-  const events = discoveryQuery.data || [];
+  const events: DiscoveryCardViewModel[] =
+    discoveryQuery.data?.pages.flatMap((page) => page.items.map(mapDiscoveryEvent)) || [];
+  const showDiscoveryError =
+    discoveryQuery.isError && !discoveryQuery.isLoading && events.length === 0;
+
+  React.useEffect(() => {
+    if (events.length > 0) {
+      setTracked((prev) => {
+        const next = Object.fromEntries(events.map((event) => [event.id, !!event.trackingEnabled]));
+        const prevKeys = Object.keys(prev);
+        const nextKeys = Object.keys(next);
+        const isUnchanged =
+          prevKeys.length === nextKeys.length &&
+          nextKeys.every((key) => prev[key] === next[key]);
+        return isUnchanged ? prev : next;
+      });
+    }
+  }, [events]);
+
+  const loadMoreRef = useInfiniteScrollSentinel({
+    hasNextPage: !!discoveryQuery.hasNextPage,
+    isFetchingNextPage: discoveryQuery.isFetchingNextPage,
+    fetchNextPage: discoveryQuery.fetchNextPage,
+    enabled: !discoveryQuery.isLoading,
+  });
 
   const toggleSystemTrack = async (e: React.MouseEvent, eventId: string, source: string) => {
     e.stopPropagation();
-    const current = events.find((event) => event.id === eventId);
-    const shouldTrack = !current?.trackingEnabled;
-    await toggleMutation.mutateAsync({ eventId, shouldTrack, source });
+    if (pendingByEvent[eventId]) {
+      return;
+    }
+
+    const shouldTrack = !tracked[eventId];
+    setPendingByEvent((prev) => ({ ...prev, [eventId]: true }));
+    setTracked((prev) => ({ ...prev, [eventId]: shouldTrack }));
+
+    try {
+      await toggleMutation.mutateAsync({ eventId, shouldTrack, source });
+    } catch {
+      setTracked((prev) => ({ ...prev, [eventId]: !shouldTrack }));
+    } finally {
+      setPendingByEvent((prev) => ({ ...prev, [eventId]: false }));
+    }
   };
 
   return (
@@ -57,6 +108,9 @@ export function AdminDiscoveryPage() {
       </div>
 
       <div className="flex items-center gap-2">
+        <span className="mr-2 flex items-center gap-1.5 font-mono text-xs text-text-muted">
+          <Filter size={14} /> FILTERS:
+        </span>
         {(['ALL', 'BAYSE', 'POLYMARKET'] as const).map((option) => (
           <button
             key={option}
@@ -71,9 +125,15 @@ export function AdminDiscoveryPage() {
       {discoveryQuery.isLoading && !discoveryQuery.data && (
         <div className="font-mono text-sm text-text-muted">Loading admin discovery...</div>
       )}
-      {discoveryQuery.isError && (
-        <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 p-4 text-sm text-amber-500">
-          Failed to load admin discovery.
+      {showDiscoveryError && (
+        <div className={`rounded-xl border p-4 text-sm ${
+          (discoveryQuery.error as any)?.response?.status === 503
+            ? 'border-prism-blue/20 bg-prism-blue/10 text-prism-blue'
+            : 'border-amber-500/20 bg-amber-500/10 text-amber-500'
+        }`}>
+          {(discoveryQuery.error as any)?.response?.status === 503
+            ? 'Admin discovery feed is warming up. Data will appear shortly.'
+            : 'Failed to load admin discovery.'}
         </div>
       )}
 
@@ -82,11 +142,20 @@ export function AdminDiscoveryPage() {
           <SignalCard
             key={event.id}
             event={event}
-            isTracked={!!event.trackingEnabled}
+            isTracked={!!tracked[event.id]}
+            isTrackPending={!!pendingByEvent[event.id]}
             onTrack={toggleSystemTrack}
           />
         ))}
       </div>
+
+      {!discoveryQuery.isLoading && events.length > 0 && (
+        <div ref={loadMoreRef} className="flex min-h-10 items-center justify-center">
+          {discoveryQuery.isFetchingNextPage && (
+            <span className="font-mono text-xs text-text-muted">Loading more events...</span>
+          )}
+        </div>
+      )}
     </div>
   );
 }

@@ -11,7 +11,13 @@ from websockets.asyncio.client import ClientConnection
 
 from src.db.main import async_session_maker
 from src.markets.baselines import BaselineServices
-from src.markets.live_state import EventLiveState, LiveStateServices, MarketLiveState, SubscriptionLiveState
+from src.markets.live_state import (
+    BayseSubscriptionPlan,
+    EventLiveState,
+    LiveStateServices,
+    MarketLiveState,
+    SubscriptionLiveState,
+)
 from src.markets.models import (
     Currency,
     MarketEngine,
@@ -61,6 +67,7 @@ class BayseWebSocketManager:
         self._last_connect_at: str | None = None
         self._reconnect_count: int = 0
         self._last_error: str | None = None
+        self._last_subscription_plan_version: str | None = None
 
     async def start(self) -> None:
         if self._task and not self._task.done():
@@ -170,6 +177,56 @@ class BayseWebSocketManager:
         if not self._ws:
             return
 
+        plan = await self._load_subscription_plan()
+        if plan is None:
+            return
+
+        if plan.version == self._last_subscription_plan_version and self._active_subscriptions:
+            return
+
+        event_ids = set(plan.event_ids)
+        if not event_ids:
+            self._last_subscription_plan_version = plan.version
+            return
+
+        currency_map: dict[str, set[Currency]] = defaultdict(set)
+        for event_id, currency_values in plan.currencies_by_event.items():
+            for currency_value in currency_values:
+                try:
+                    currency_map[event_id].add(Currency(currency_value))
+                except ValueError:
+                    logger.warning("Skipping unsupported Bayse subscription currency %s", currency_value)
+
+        for event_id in event_ids:
+            await self._subscribe_prices(event_id)
+            await self._subscribe_activity(event_id)
+
+        for currency_value, market_ids in plan.orderbook_market_ids_by_currency.items():
+            try:
+                currency = Currency(currency_value)
+            except ValueError:
+                logger.warning("Skipping unsupported Bayse orderbook currency %s", currency_value)
+                continue
+            await self._subscribe_orderbook(currency=currency, market_ids=market_ids)
+
+        self._last_subscription_plan_version = plan.version
+
+    async def _load_subscription_plan(self) -> BayseSubscriptionPlan | None:
+        cached_plan = await self.live_state.get_subscription_plan(identifier=MarketSource.BAYSE.value)
+        if cached_plan is not None:
+            try:
+                return BayseSubscriptionPlan.model_validate(cached_plan)
+            except Exception:
+                logger.warning("Invalid Bayse subscription plan in Redis; rebuilding", exc_info=True)
+
+        plan = await self._build_subscription_plan_from_db()
+        await self.live_state.set_subscription_plan(
+            identifier=MarketSource.BAYSE.value,
+            payload=plan,
+        )
+        return plan
+
+    async def _build_subscription_plan_from_db(self) -> BayseSubscriptionPlan:
         async with async_session_maker() as session:
             tracked_event_ids = set(
                 await session.exec(
@@ -184,6 +241,7 @@ class BayseWebSocketManager:
 
             tracked_markets_result = await session.exec(
                 select(TrackedMarket).where(
+                    TrackedMarket.source == MarketSource.BAYSE,
                     TrackedMarket.tracking_enabled == True,
                     or_(
                         TrackedMarket.is_system_tracked == True,
@@ -193,38 +251,41 @@ class BayseWebSocketManager:
             )
             tracked_markets = tracked_markets_result.all()
 
-            if not tracked_markets:
-                return
-
-            event_ids = {market.event_id for market in tracked_markets}
-            event_metric_result = await session.exec(
-                select(TrackedEventMetric).where(
-                    TrackedEventMetric.source == MarketSource.BAYSE,
-                    TrackedEventMetric.event_id.in_(event_ids),
+            event_ids = sorted({market.event_id for market in tracked_markets})
+            currencies_by_event: dict[str, set[str]] = defaultdict(set)
+            if event_ids:
+                event_metric_result = await session.exec(
+                    select(TrackedEventMetric).where(
+                        TrackedEventMetric.source == MarketSource.BAYSE,
+                        TrackedEventMetric.event_id.in_(event_ids),
+                    )
                 )
-            )
-            event_metrics = event_metric_result.all()
-
-        currency_map: dict[str, set[Currency]] = defaultdict(set)
-        for metric in event_metrics:
-            currency_map[metric.event_id].add(metric.currency)
-        for event_id in event_ids:
-            if not currency_map[event_id]:
-                currency_map[event_id].add(Currency.DOLLAR)
+                event_metrics = event_metric_result.all()
+                for metric in event_metrics:
+                    currencies_by_event[metric.event_id].add(metric.currency.value)
 
         for event_id in event_ids:
-            await self._subscribe_prices(event_id)
-            await self._subscribe_activity(event_id)
+            if not currencies_by_event[event_id]:
+                currencies_by_event[event_id].add(Currency.DOLLAR.value)
 
-        orderbook_groups: dict[Currency, list[str]] = defaultdict(list)
+        orderbook_market_ids_by_currency: dict[str, set[str]] = defaultdict(set)
         for market in tracked_markets:
             if market.engine != MarketEngine.CLOB:
                 continue
-            for currency in currency_map.get(market.event_id, {Currency.DOLLAR}):
-                orderbook_groups[currency].append(market.market_id)
+            for currency_value in currencies_by_event.get(market.event_id, {Currency.DOLLAR.value}):
+                orderbook_market_ids_by_currency[currency_value].add(market.market_id)
 
-        for currency, market_ids in orderbook_groups.items():
-            await self._subscribe_orderbook(currency=currency, market_ids=market_ids)
+        return BayseSubscriptionPlan(
+            event_ids=event_ids,
+            currencies_by_event={
+                event_id: sorted(currency_values)
+                for event_id, currency_values in currencies_by_event.items()
+            },
+            orderbook_market_ids_by_currency={
+                currency_value: sorted(market_ids)
+                for currency_value, market_ids in orderbook_market_ids_by_currency.items()
+            },
+        )
 
     async def _subscribe_prices(self, event_id: str) -> None:
         subscription_id = ("prices", event_id, None, None)

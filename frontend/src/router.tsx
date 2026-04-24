@@ -5,6 +5,8 @@ import { ExplanationPage } from './pages/ExplanationPage';
 import { SignupPage } from './pages/auth/SignupPage';
 import { LoginPage } from './pages/auth/LoginPage';
 import { OTPPage } from './pages/auth/OTPPage';
+import { ForgotPasswordPage } from './pages/auth/ForgotPasswordPage';
+import { ResetPasswordPage } from './pages/auth/ResetPasswordPage';
 import { AppLayout } from './components/layout/AppLayout';
 import { AdminLayout } from './components/layout/AdminLayout';
 import { DiscoveryPage } from './pages/app/DiscoveryPage';
@@ -53,6 +55,24 @@ export const otpRoute = createRoute({
     return {
       email: (search.email as string) || '',
       uid: (search.uid as string) || '',
+      type: (search.type as 'signup' | 'forgotpassword') || 'signup',
+    };
+  },
+});
+
+export const forgotPasswordRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/auth/forgot-password',
+  component: ForgotPasswordPage,
+});
+
+export const resetPasswordRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/auth/reset-password',
+  component: ResetPasswordPage,
+  validateSearch: (search: Record<string, unknown>) => {
+    return {
+      reset_token: (search.reset_token as string) || '',
     };
   },
 });
@@ -127,6 +147,8 @@ const routeTree = rootRoute.addChildren([
   signupRoute,
   loginRoute,
   otpRoute,
+  forgotPasswordRoute,
+  resetPasswordRoute,
   appRouteWithChildren,
   adminLoginRoute,
   adminRouteWithChildren,

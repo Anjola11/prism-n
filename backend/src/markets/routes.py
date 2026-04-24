@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, Query, Request, status
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from src.db.main import get_session
@@ -14,6 +14,22 @@ from src.utils.responses import success_response
 
 
 markets_router = APIRouter()
+
+
+def _build_paginated_payload(items: list, *, page: int, limit: int, total: int | None = None) -> dict:
+    effective_total = total if total is not None else len(items)
+    start = (page - 1) * limit
+    end = start + limit
+    paginated_items = items if total is not None else items[start:end]
+    return {
+        "items": paginated_items,
+        "pagination": {
+            "page": page,
+            "limit": limit,
+            "total": effective_total,
+            "has_more": end < effective_total,
+        },
+    }
 
 
 def get_bayse_service(request: Request) -> BayseServices:
@@ -70,20 +86,29 @@ async def track_event(
 async def get_discovery_events(
     source: MarketSource | None = None,
     currency: Currency = Currency.DOLLAR,
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=20, ge=1, le=100),
     session: AsyncSession = Depends(get_session),
     market_services: MarketServices = Depends(get_market_services),
     user_id: UUID = Depends(get_verified_user_id),
 ):
     logger.info("Discovery route called for user %s in %s", user_id, currency.value)
-    result = await market_services.get_discovery_feed_for_user(
+    result, total_count = await market_services.get_discovery_feed_for_user(
         session=session,
         user_id=user_id,
         source=source,
         currency=currency,
+        page=page,
+        limit=limit,
     )
     return success_response(
         message="Discovery events fetched successfully",
-        data=[item.model_dump() for item in result],
+        data=_build_paginated_payload(
+            [item.model_dump() for item in result],
+            page=page,
+            limit=limit,
+            total=total_count,
+        ),
     )
 
 
@@ -148,17 +173,26 @@ async def untrack_event(
 )
 async def list_tracked_events(
     currency: Currency = Currency.DOLLAR,
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=20, ge=1, le=100),
     session: AsyncSession = Depends(get_session),
     market_services: MarketServices = Depends(get_market_services),
     user_id: UUID = Depends(get_verified_user_id),
 ):
     logger.info("Tracker route called for user %s in %s", user_id, currency.value)
-    result = await market_services.list_tracked_events_for_user(
+    result, total_count = await market_services.list_tracked_events_page_for_user(
         session=session,
         user_id=user_id,
         currency=currency,
+        page=page,
+        limit=limit,
     )
     return success_response(
         message="Tracked events fetched successfully",
-        data=[item.model_dump() for item in result],
+        data=_build_paginated_payload(
+            [item.model_dump() for item in result],
+            page=page,
+            limit=limit,
+            total=total_count,
+        ),
     )

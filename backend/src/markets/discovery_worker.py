@@ -37,7 +37,7 @@ class DiscoveryWorker:
     """Refreshes the discovery feed read-model in Redis on a timer."""
 
     REDIS_NAMESPACE = "discovery-feed"
-    REDIS_TTL = 90  # safety expiry; worker refreshes every interval_seconds
+    REDIS_TTL = 300  # allow several slow cycles before the feed expires
 
     def __init__(
         self,
@@ -58,6 +58,38 @@ class DiscoveryWorker:
 
         self._task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
+
+    def _get_tracked_event_icon_url(self, tracked_markets: list[TrackedMarket]) -> str | None:
+        for market in tracked_markets:
+            if market.market_image_128_url:
+                return market.market_image_128_url
+            if market.market_image_url:
+                return market.market_image_url
+        return None
+
+    def _get_payload_event_icon_url(
+        self,
+        *,
+        markets: list[dict] | None = None,
+        event_payload: dict | None = None,
+    ) -> str | None:
+        for market in markets or []:
+            if market.get("image128Url"):
+                return market["image128Url"]
+            if market.get("imageUrl"):
+                return market["imageUrl"]
+            if market.get("icon"):
+                return market["icon"]
+            if market.get("image"):
+                return market["image"]
+
+        if event_payload:
+            if event_payload.get("icon"):
+                return event_payload["icon"]
+            if event_payload.get("image"):
+                return event_payload["image"]
+
+        return None
 
     async def start(self) -> None:
         if self._task and not self._task.done():
@@ -360,7 +392,7 @@ class DiscoveryWorker:
                 "event_id": event_id,
                 "event_title": first.event_title,
                 "event_slug": first.event_slug,
-                "event_icon_url": first.market_image_128_url or first.market_image_url,
+                "event_icon_url": self._get_tracked_event_icon_url(tracked_markets),
                 "source": first.source.value,
                 "currency": currency.value,
                 "event_type": first.event_type.value,
@@ -404,7 +436,7 @@ class DiscoveryWorker:
             "event_id": event_id,
             "event_title": event_title,
             "event_slug": event_slug,
-            "event_icon_url": (first_market or {}).get("image128Url") or (first_market or {}).get("imageUrl"),
+            "event_icon_url": self._get_payload_event_icon_url(markets=markets_list),
             "source": "bayse",
             "currency": currency.value,
             "event_type": event_type,
@@ -497,7 +529,7 @@ class DiscoveryWorker:
                 "event_id": event_id,
                 "event_title": first.event_title,
                 "event_slug": first.event_slug,
-                "event_icon_url": first.market_image_128_url or first.market_image_url,
+                "event_icon_url": self._get_tracked_event_icon_url(tracked_markets),
                 "source": first.source.value,
                 "currency": Currency.DOLLAR.value,
                 "event_type": first.event_type.value,
@@ -544,7 +576,10 @@ class DiscoveryWorker:
             "event_id": event_id,
             "event_title": event_payload.get("title", ""),
             "event_slug": event_payload.get("slug"),
-            "event_icon_url": (first_market or {}).get("icon") or (first_market or {}).get("image") or event_payload.get("icon") or event_payload.get("image"),
+            "event_icon_url": self._get_payload_event_icon_url(
+                markets=markets_list,
+                event_payload=event_payload,
+            ),
             "source": MarketSource.POLYMARKET.value,
             "currency": Currency.DOLLAR.value,
             "event_type": event_type,

@@ -47,21 +47,12 @@ function StatusTile({
 }
 
 export function AdminOverviewPage() {
-  const analyticsQuery = useQuery({
-    queryKey: ['admin-analytics'],
-    queryFn: () => adminApi.getAnalytics(),
+  const overviewQuery = useQuery({
+    queryKey: ['admin-overview'],
+    queryFn: () => adminApi.getOverview(),
     staleTime: 30_000,
     gcTime: 5 * 60_000,
     refetchInterval: 30_000,
-    placeholderData: (previousData) => previousData,
-  });
-
-  const systemStatusQuery = useQuery({
-    queryKey: ['admin-system-status'],
-    queryFn: () => adminApi.getSystemStatus(),
-    staleTime: 10_000,
-    gcTime: 5 * 60_000,
-    refetchInterval: 15_000,
     placeholderData: (previousData) => previousData,
   });
 
@@ -74,22 +65,11 @@ export function AdminOverviewPage() {
     placeholderData: (previousData) => previousData,
   });
 
-  const systemTrackerPreviewQuery = useQuery({
-    queryKey: ['admin-system-tracker-preview'],
-    queryFn: async () => {
-      const response = await adminApi.getSystemTracker();
-      return response.map(mapDiscoveryEvent).slice(0, 4);
-    },
-    staleTime: 30_000,
-    gcTime: 5 * 60_000,
-    refetchInterval: 30_000,
-    placeholderData: (previousData) => previousData,
-  });
-
-  const analytics = analyticsQuery.data;
-  const systemStatus = systemStatusQuery.data;
+  const overview = overviewQuery.data;
+  const analytics = overview;
+  const systemStatus = overview?.system_status;
   const auditLogs = auditLogsQuery.data || [];
-  const systemTrackedEvents = systemTrackerPreviewQuery.data || [];
+  const systemTrackedEvents = overview?.system_tracked_events?.map(mapDiscoveryEvent).slice(0, 4) || [];
   const bayseStatus = systemStatus?.websocket?.bayse;
   const polymarketStatus = systemStatus?.websocket?.polymarket;
   const backgroundJobs = systemStatus?.background_jobs || {};
@@ -263,13 +243,13 @@ export function AdminOverviewPage() {
           </span>
         </div>
         <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
-          {systemTrackerPreviewQuery.isLoading && systemTrackedEvents.length === 0 && Array.from({ length: 2 }).map((_, index) => (
+          {overviewQuery.isLoading && systemTrackedEvents.length === 0 && Array.from({ length: 2 }).map((_, index) => (
             <div key={`admin-preview-skeleton-${index}`} className="h-[360px] animate-pulse rounded-xl border border-border bg-card" />
           ))}
           {systemTrackedEvents.map((event: DiscoveryCardViewModel) => (
             <SignalCard key={event.id} event={event} isTracked />
           ))}
-          {!systemTrackerPreviewQuery.isLoading && systemTrackedEvents.length === 0 && (
+          {!overviewQuery.isLoading && systemTrackedEvents.length === 0 && (
             <p className="text-sm text-text-muted">The system is not tracking any events yet.</p>
           )}
         </div>

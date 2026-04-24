@@ -91,6 +91,26 @@ class AssetMappingLiveState(BaseModel):
     last_bound_at: str = Field(default_factory=utc_now_iso)
 
 
+class BayseSubscriptionPlan(BaseModel):
+    version: str = Field(default_factory=utc_now_iso)
+    event_ids: list[str] = Field(default_factory=list)
+    currencies_by_event: dict[str, list[str]] = Field(default_factory=dict)
+    orderbook_market_ids_by_currency: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class PolymarketAssetBindingState(BaseModel):
+    asset_id: str
+    event_id: str
+    market_id: str
+    currency: str
+    outcome_side: str
+
+
+class PolymarketSubscriptionPlan(BaseModel):
+    version: str = Field(default_factory=utc_now_iso)
+    bindings: list[PolymarketAssetBindingState] = Field(default_factory=list)
+
+
 class LiveStateServices:
     def __init__(self, redis=redis_client):
         self.redis = redis
@@ -125,6 +145,9 @@ class LiveStateServices:
     def asset_mapping_key(self, *, source: MarketSource, asset_id: str) -> str:
         return f"prism:assetmap:{source.value}:{asset_id}"
 
+    def coordination_key(self, *, namespace: str, identifier: str) -> str:
+        return f"prism:coordination:{namespace}:{identifier}"
+
     async def set_read_model(self, *, namespace: str, identifier: str, payload, ttl_seconds: int | None = None) -> None:
         key = self.read_model_key(namespace=namespace, identifier=identifier)
         serialized = json.dumps(payload)
@@ -141,6 +164,30 @@ class LiveStateServices:
 
     async def delete_read_model(self, *, namespace: str, identifier: str) -> None:
         await self.redis.delete(self.read_model_key(namespace=namespace, identifier=identifier))
+
+    async def set_subscription_plan(self, *, identifier: str, payload: BaseModel | dict) -> None:
+        serialized = payload.model_dump(mode="json") if isinstance(payload, BaseModel) else payload
+        await self.set_read_model(
+            namespace="subscription-plan",
+            identifier=identifier,
+            payload=serialized,
+        )
+
+    async def get_subscription_plan(self, *, identifier: str):
+        return await self.get_read_model(
+            namespace="subscription-plan",
+            identifier=identifier,
+        )
+
+    async def acquire_coordination_lock(self, *, namespace: str, identifier: str, ttl_seconds: int) -> bool:
+        return bool(
+            await self.redis.set(
+                self.coordination_key(namespace=namespace, identifier=identifier),
+                utc_now_iso(),
+                ex=ttl_seconds,
+                nx=True,
+            )
+        )
 
     async def set_asset_mapping(self, state: AssetMappingLiveState) -> None:
         await self.redis.set(

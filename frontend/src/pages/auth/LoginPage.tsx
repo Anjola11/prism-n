@@ -66,7 +66,13 @@ export function LoginPage() {
           <div className="flex flex-col gap-2 relative">
             <label className="font-mono text-xs text-text-secondary uppercase tracking-wider flex justify-between">
               <span>Password</span>
-              <span className="text-prism-blue/60 hover:text-prism-blue cursor-pointer lowercase">forgot?</span>
+              <button 
+                type="button" 
+                onClick={() => navigate({ to: '/auth/forgot-password' })}
+                className="text-prism-blue/60 hover:text-prism-blue cursor-pointer lowercase"
+              >
+                forgot?
+              </button>
             </label>
             <div className="relative">
               <input 
