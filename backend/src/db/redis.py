@@ -6,7 +6,11 @@ from src.utils.logger import logger
 # Initialize
 redis_client = Redis.from_url(
     Config.REDIS_URL,
-    decode_responses=True
+    decode_responses=True,
+    max_connections=Config.REDIS_MAX_CONNECTIONS,
+    health_check_interval=30,
+    socket_connect_timeout=5,
+    socket_timeout=5,
 )
 
 async def check_redis_connection():

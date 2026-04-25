@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str
     ALLOWED_ORIGINS: list
     REDIS_URL: str
+    REDIS_MAX_CONNECTIONS: int = 12
     BREVO_API_KEY: str
     BREVO_SENDER_NAME: str
     BREVO_EMAIL: str 
