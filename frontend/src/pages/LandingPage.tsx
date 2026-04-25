@@ -1,7 +1,8 @@
-import React, { useLayoutEffect, useRef } from 'react';
+﻿import React, { useLayoutEffect, useRef } from 'react';
 import { useNavigate } from '@tanstack/react-router';
 import { PrismLogo } from '../components/brand/PrismLogo';
 import { Button } from '../components/ui/Button';
+import { ThemeToggle } from '../components/ui/ThemeToggle';
 import gsap from 'gsap';
 import {
   Activity,
@@ -49,7 +50,8 @@ export function LandingPage() {
     <div className="relative min-h-screen overflow-hidden bg-void text-text-primary" ref={container}>
       <nav className="fixed top-0 left-0 right-0 z-50 flex h-16 items-center justify-between border-b border-border bg-navy/92 px-6 backdrop-blur-lg md:px-12 lg:px-20">
         <PrismLogo size={28} />
-        <div className="flex gap-3">
+        <div className="flex items-center gap-3">
+          <ThemeToggle compact />
           <Button variant="ghost" size="sm" onClick={() => navigate({ to: '/auth/login' })}>
             Sign In
           </Button>
@@ -152,7 +154,7 @@ export function LandingPage() {
               </p>
               <ul className="mt-2 space-y-6">
                 <li className="flex gap-4">
-                  <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border border-border bg-navy font-mono text-xs text-white">1</div>
+                  <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border border-border bg-navy font-mono text-xs text-text-primary">1</div>
                   <div>
                     <strong className="mb-1 block font-heading text-text-primary">Universal context</strong>
                     <span className="text-sm">
@@ -161,7 +163,7 @@ export function LandingPage() {
                   </div>
                 </li>
                 <li className="flex gap-4">
-                  <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border border-border bg-navy font-mono text-xs text-white">2</div>
+                  <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border border-border bg-navy font-mono text-xs text-text-primary">2</div>
                   <div>
                     <strong className="mb-1 block font-heading text-text-primary">Instant explanation</strong>
                     <span className="text-sm">
@@ -188,7 +190,7 @@ export function LandingPage() {
                   <span className="rounded border border-border/60 bg-navy px-2 py-1 font-mono text-[10px] uppercase tracking-widest text-text-secondary shadow-sm">
                     Bayse
                   </span>
-                  <span className="rounded border border-emerald-400/20 bg-emerald-400/10 px-2 py-0.5 font-mono text-xs font-bold text-emerald-400 shadow-sm">
+                  <span className="signal-badge-high rounded px-2 py-0.5 font-mono text-xs font-bold shadow-sm">
                     SCORE 88
                   </span>
                 </div>
@@ -315,4 +317,5 @@ export function LandingPage() {
     </div>
   );
 }
+
 

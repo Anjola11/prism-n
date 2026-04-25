@@ -6,6 +6,7 @@ import { PrismLogo } from '../brand/PrismLogo';
 import { adminApi } from '../../lib/api/admin';
 import { authApi } from '../../lib/api/auth';
 import type { AuthUserApi } from '../../lib/api/types';
+import { ThemeToggle } from '../ui/ThemeToggle';
 
 const adminBasePath = import.meta.env.VITE_ADMIN_ROUTE_PREFIX || '/control-room';
 
@@ -116,6 +117,7 @@ export function AdminLayout() {
         </div>
 
         <div className="flex items-center gap-4">
+          <ThemeToggle compact />
           <button
             className="flex h-8 w-8 items-center justify-center rounded-full border border-border bg-card/40 text-text-secondary transition-colors hover:text-text-primary md:hidden"
             onClick={() => setIsMobileNavOpen((prev) => !prev)}

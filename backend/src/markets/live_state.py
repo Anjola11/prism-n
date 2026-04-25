@@ -1,8 +1,10 @@
+import asyncio
 import json
 from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
 
+from src.config import Config
 from src.db.redis import redis_client
 from src.markets.models import Currency, MarketEngine, MarketSource, TrackedMarket
 from src.markets.scoring import MarketScoreResult, MarketScoringInput
@@ -114,6 +116,11 @@ class PolymarketSubscriptionPlan(BaseModel):
 class LiveStateServices:
     def __init__(self, redis=redis_client):
         self.redis = redis
+        self._redis_semaphore = asyncio.Semaphore(Config.REDIS_OPERATION_CONCURRENCY)
+
+    async def _execute_redis(self, operation):
+        async with self._redis_semaphore:
+            return await operation
 
     def event_key(self, *, source: MarketSource, event_id: str, currency: Currency) -> str:
         return f"prism:event:{source.value}:{currency.value}:{event_id}"
@@ -152,18 +159,22 @@ class LiveStateServices:
         key = self.read_model_key(namespace=namespace, identifier=identifier)
         serialized = json.dumps(payload)
         if ttl_seconds:
-            await self.redis.set(key, serialized, ex=ttl_seconds)
+            await self._execute_redis(self.redis.set(key, serialized, ex=ttl_seconds))
             return
-        await self.redis.set(key, serialized)
+        await self._execute_redis(self.redis.set(key, serialized))
 
     async def get_read_model(self, *, namespace: str, identifier: str):
-        payload = await self.redis.get(self.read_model_key(namespace=namespace, identifier=identifier))
+        payload = await self._execute_redis(
+            self.redis.get(self.read_model_key(namespace=namespace, identifier=identifier))
+        )
         if not payload:
             return None
         return json.loads(payload)
 
     async def delete_read_model(self, *, namespace: str, identifier: str) -> None:
-        await self.redis.delete(self.read_model_key(namespace=namespace, identifier=identifier))
+        await self._execute_redis(
+            self.redis.delete(self.read_model_key(namespace=namespace, identifier=identifier))
+        )
 
     async def set_subscription_plan(self, *, identifier: str, payload: BaseModel | dict) -> None:
         serialized = payload.model_dump(mode="json") if isinstance(payload, BaseModel) else payload
@@ -181,18 +192,22 @@ class LiveStateServices:
 
     async def acquire_coordination_lock(self, *, namespace: str, identifier: str, ttl_seconds: int) -> bool:
         return bool(
-            await self.redis.set(
-                self.coordination_key(namespace=namespace, identifier=identifier),
-                utc_now_iso(),
-                ex=ttl_seconds,
-                nx=True,
+            await self._execute_redis(
+                self.redis.set(
+                    self.coordination_key(namespace=namespace, identifier=identifier),
+                    utc_now_iso(),
+                    ex=ttl_seconds,
+                    nx=True,
+                )
             )
         )
 
     async def set_asset_mapping(self, state: AssetMappingLiveState) -> None:
-        await self.redis.set(
-            self.asset_mapping_key(source=state.source, asset_id=state.asset_id),
-            state.model_dump_json(),
+        await self._execute_redis(
+            self.redis.set(
+                self.asset_mapping_key(source=state.source, asset_id=state.asset_id),
+                state.model_dump_json(),
+            )
         )
 
     async def get_asset_mapping(
@@ -201,15 +216,19 @@ class LiveStateServices:
         source: MarketSource,
         asset_id: str,
     ) -> AssetMappingLiveState | None:
-        payload = await self.redis.get(self.asset_mapping_key(source=source, asset_id=asset_id))
+        payload = await self._execute_redis(
+            self.redis.get(self.asset_mapping_key(source=source, asset_id=asset_id))
+        )
         if not payload:
             return None
         return AssetMappingLiveState.model_validate_json(payload)
 
     async def set_event_state(self, state: EventLiveState) -> None:
-        await self.redis.set(
-            self.event_key(source=state.source, event_id=state.event_id, currency=state.currency),
-            state.model_dump_json(),
+        await self._execute_redis(
+            self.redis.set(
+                self.event_key(source=state.source, event_id=state.event_id, currency=state.currency),
+                state.model_dump_json(),
+            )
         )
 
     async def get_event_state(
@@ -219,7 +238,9 @@ class LiveStateServices:
         event_id: str,
         currency: Currency,
     ) -> EventLiveState | None:
-        payload = await self.redis.get(self.event_key(source=source, event_id=event_id, currency=currency))
+        payload = await self._execute_redis(
+            self.redis.get(self.event_key(source=source, event_id=event_id, currency=currency))
+        )
         if not payload:
             return None
         return EventLiveState.model_validate_json(payload)
@@ -244,9 +265,11 @@ class LiveStateServices:
         return updated
 
     async def set_market_state(self, state: MarketLiveState) -> None:
-        await self.redis.set(
-            self.market_key(source=state.source, market_id=state.market_id, currency=state.currency),
-            state.model_dump_json(),
+        await self._execute_redis(
+            self.redis.set(
+                self.market_key(source=state.source, market_id=state.market_id, currency=state.currency),
+                state.model_dump_json(),
+            )
         )
 
     async def get_market_state(
@@ -256,7 +279,9 @@ class LiveStateServices:
         market_id: str,
         currency: Currency,
     ) -> MarketLiveState | None:
-        payload = await self.redis.get(self.market_key(source=source, market_id=market_id, currency=currency))
+        payload = await self._execute_redis(
+            self.redis.get(self.market_key(source=source, market_id=market_id, currency=currency))
+        )
         if not payload:
             return None
         return MarketLiveState.model_validate_json(payload)
@@ -294,16 +319,18 @@ class LiveStateServices:
         data["last_updated_at"] = utc_now_iso()
         updated = MarketLiveState(**data)
         await self.set_market_state(updated)
-        await self.redis.set(
-            self.persistence_key(source=source, market_id=market_id, currency=currency),
-            json.dumps(
-                {
-                    "ticks": updated.persistence_ticks,
-                    "last_direction": updated.last_direction,
-                    "has_recent_reversal": updated.has_recent_reversal,
-                    "updated_at": updated.last_updated_at,
-                }
-            ),
+        await self._execute_redis(
+            self.redis.set(
+                self.persistence_key(source=source, market_id=market_id, currency=currency),
+                json.dumps(
+                    {
+                        "ticks": updated.persistence_ticks,
+                        "last_direction": updated.last_direction,
+                        "has_recent_reversal": updated.has_recent_reversal,
+                        "updated_at": updated.last_updated_at,
+                    }
+                ),
+            )
         )
         return updated
 
@@ -338,9 +365,11 @@ class LiveStateServices:
         )
 
     async def set_signal_state(self, state: SignalLiveState) -> None:
-        await self.redis.set(
-            self.signal_key(source=state.source, market_id=state.market_id, currency=state.currency),
-            state.model_dump_json(),
+        await self._execute_redis(
+            self.redis.set(
+                self.signal_key(source=state.source, market_id=state.market_id, currency=state.currency),
+                state.model_dump_json(),
+            )
         )
 
     async def get_signal_state(
@@ -350,20 +379,24 @@ class LiveStateServices:
         market_id: str,
         currency: Currency,
     ) -> SignalLiveState | None:
-        payload = await self.redis.get(self.signal_key(source=source, market_id=market_id, currency=currency))
+        payload = await self._execute_redis(
+            self.redis.get(self.signal_key(source=source, market_id=market_id, currency=currency))
+        )
         if not payload:
             return None
         return SignalLiveState.model_validate_json(payload)
 
     async def set_subscription_state(self, state: SubscriptionLiveState) -> None:
-        await self.redis.set(
-            self.subscription_key(
-                source=state.source,
-                channel=state.channel,
-                event_id=state.event_id,
-                market_id=state.market_id,
-            ),
-            state.model_dump_json(),
+        await self._execute_redis(
+            self.redis.set(
+                self.subscription_key(
+                    source=state.source,
+                    channel=state.channel,
+                    event_id=state.event_id,
+                    market_id=state.market_id,
+                ),
+                state.model_dump_json(),
+            )
         )
 
     async def get_subscription_state(
@@ -374,12 +407,14 @@ class LiveStateServices:
         event_id: str,
         market_id: str | None = None,
     ) -> SubscriptionLiveState | None:
-        payload = await self.redis.get(
-            self.subscription_key(
-                source=source,
-                channel=channel,
-                event_id=event_id,
-                market_id=market_id,
+        payload = await self._execute_redis(
+            self.redis.get(
+                self.subscription_key(
+                    source=source,
+                    channel=channel,
+                    event_id=event_id,
+                    market_id=market_id,
+                )
             )
         )
         if not payload:

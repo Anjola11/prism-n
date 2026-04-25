@@ -4,6 +4,7 @@ import { PrismLogo } from '../brand/PrismLogo';
 import { Search, Bookmark, LogOut } from 'lucide-react';
 import { authApi } from '../../lib/api/auth';
 import type { AuthUserApi } from '../../lib/api/types';
+import { ThemeToggle } from '../ui/ThemeToggle';
 
 export function AppLayout() {
   const navigate = useNavigate();
@@ -88,6 +89,7 @@ export function AppLayout() {
 
         {/* Right Section */}
         <div className="flex items-center gap-4">
+          <ThemeToggle compact />
           <div className="hidden sm:flex flex-col items-end">
             <span className="font-mono text-[10px] uppercase tracking-wider text-text-muted">Signed In</span>
             <span className="text-xs text-text-secondary">{currentUser?.email || 'Session active'}</span>

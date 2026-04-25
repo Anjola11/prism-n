@@ -22,17 +22,17 @@ export function SignalCard({ event, onTrack, isTracked = false, isTrackPending =
   const isModerateSignal = signal?.classification === 'moderate';
 
   let borderColor = 'border-border hover:border-prism-blue/40';
-  let badgeColor = 'bg-amber-500/10 text-amber-500 border-amber-500/20';
-  let signalTextColor = 'text-amber-500';
+  let badgeColor = 'signal-badge-low';
+  let signalTextColor = 'signal-text-low';
 
   if (isHighSignal) {
     borderColor = 'border-border hover:border-emerald-400/50';
-    badgeColor = 'bg-emerald-400/10 text-emerald-400 border-emerald-400/20';
-    signalTextColor = 'text-emerald-400';
+    badgeColor = 'signal-badge-high';
+    signalTextColor = 'signal-text-high';
   } else if (isModerateSignal) {
     borderColor = 'border-border hover:border-slate-400/50';
-    badgeColor = 'bg-slate-400/10 text-slate-300 border-slate-400/20';
-    signalTextColor = 'text-slate-300';
+    badgeColor = 'signal-badge-mid';
+    signalTextColor = 'signal-text-mid';
   }
 
   const directionLabel =
@@ -46,10 +46,10 @@ export function SignalCard({ event, onTrack, isTracked = false, isTrackPending =
   const ptsPrefix = probabilityDelta > 0 ? '+' : '';
   const ptsColor =
     probabilityDelta > 0
-      ? 'text-emerald-400'
+      ? 'signal-delta-up'
       : probabilityDelta < 0
-        ? 'text-amber-500'
-        : 'text-slate-400';
+        ? 'signal-delta-down'
+        : 'signal-delta-flat';
 
   const classificationLabel = signal?.classification
     ? signal.classification.replace(/_/g, ' ').toUpperCase()
@@ -115,7 +115,7 @@ export function SignalCard({ event, onTrack, isTracked = false, isTrackPending =
             <span className="font-mono text-sm font-bold text-text-secondary">{iconFallback}</span>
           )}
         </div>
-        <h3 className="min-w-0 flex-1 font-heading text-lg font-medium leading-[1.35] text-text-primary transition-colors group-hover:text-white line-clamp-2">
+        <h3 className="prism-card-title min-w-0 flex-1 font-heading text-lg font-medium leading-[1.35] transition-colors line-clamp-2">
           {event.title}
         </h3>
       </div>
@@ -175,7 +175,7 @@ export function SignalCard({ event, onTrack, isTracked = false, isTrackPending =
               isTrackPending
                 ? 'cursor-not-allowed border border-border bg-card text-text-muted'
                 : isTracked
-                ? 'border border-emerald-400/20 bg-emerald-400/10 text-emerald-400'
+                ? 'signal-button-tracked'
                 : 'border border-prism-blue/20 bg-prism-blue/10 text-prism-blue hover:bg-prism-blue/20'
             }`}
           >

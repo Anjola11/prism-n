@@ -97,12 +97,12 @@ export function EventDetail() {
     );
   }
   if (eventQuery.isError) return <div className="p-10 text-center text-amber-500">Failed to fetch event detail.</div>;
-  if (!event || !selectedOutcome) return <div className="p-10 text-center text-white">Event not found</div>;
+  if (!event || !selectedOutcome) return <div className="p-10 text-center text-text-primary">Event not found</div>;
 
   const getScoreColor = (score: number) => {
-    if (score >= 70) return 'text-emerald-400 bg-emerald-400/10 border-emerald-400/20';
-    if (score >= 40) return 'text-slate-300 bg-slate-400/10 border-slate-400/20';
-    return 'text-amber-500 bg-amber-500/10 border-amber-500/20';
+    if (score >= 70) return 'signal-badge-high';
+    if (score >= 40) return 'signal-badge-mid';
+    return 'signal-badge-low';
   };
 
   const factorEntries = selectedOutcome.signal?.factors
@@ -237,10 +237,10 @@ export function EventDetail() {
                 <div
                   className={`mt-2 font-mono text-xs ${
                     selectedOutcome.probability_delta > 0
-                      ? 'text-emerald-400'
+                      ? 'signal-delta-up'
                       : selectedOutcome.probability_delta < 0
-                        ? 'text-amber-500'
-                        : 'text-slate-400'
+                        ? 'signal-delta-down'
+                        : 'signal-delta-flat'
                   }`}
                 >
                   ({selectedOutcome.probability_delta > 0 ? '+' : ''}
@@ -309,9 +309,9 @@ export function EventDetail() {
           <div className="rounded-xl border border-border bg-navy-mid p-6">
             <div className="mb-4 flex items-center gap-2">
               {selectedOutcome.signal.direction === 'RISING' ? (
-                <TrendingUp size={16} className="text-emerald-400" />
+                <TrendingUp size={16} className="signal-icon-up" />
               ) : (
-                <TrendingDown size={16} className="text-amber-500" />
+                <TrendingDown size={16} className="signal-icon-down" />
               )}
               <h3 className="font-mono text-xs uppercase tracking-wide text-text-muted">Momentum Assessment</h3>
             </div>
@@ -322,10 +322,10 @@ export function EventDetail() {
               <div
                 className={`h-full ${
                   selectedOutcome.signal.direction === 'RISING'
-                    ? 'bg-emerald-400'
+                    ? 'signal-bar-up'
                     : selectedOutcome.signal.direction === 'FALLING'
-                      ? 'bg-amber-500'
-                      : 'bg-slate-400'
+                      ? 'signal-bar-down'
+                      : 'signal-bar-flat'
                 }`}
                 style={{ width: `${Math.max(8, selectedOutcome.signal.score)}%` }}
               />

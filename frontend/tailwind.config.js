@@ -1,4 +1,6 @@
 /** @type {import('tailwindcss').Config} */
+const colorVar = (name) => `rgb(var(${name}) / <alpha-value>)`;
+
 export default {
   content: ["./index.html", "./src/**/*.{js,ts,jsx,tsx}"],
   theme: {
@@ -10,58 +12,57 @@ export default {
         code: ["JetBrains Mono", "monospace"],
       },
       colors: {
-        void: "#04080F",
+        void: colorVar("--rgb-void"),
         navy: {
-          DEFAULT: "#0A1628",
-          mid: "#0F2040",
-          light: "#163058",
+          DEFAULT: colorVar("--rgb-navy"),
+          mid: colorVar("--rgb-navy-mid"),
+          light: colorVar("--rgb-navy-light"),
         },
         border: {
-          DEFAULT: "#1E3A5F",
-          bright: "#2A4E7A",
+          DEFAULT: colorVar("--rgb-border"),
+          bright: colorVar("--rgb-border-bright"),
         },
         text: {
-          primary: "#E8F0FE",
-          secondary: "#8BA4C0",
-          muted: "#4A6080",
-          dim: "#2A3D55",
+          primary: colorVar("--rgb-text-primary"),
+          secondary: colorVar("--rgb-text-secondary"),
+          muted: colorVar("--rgb-text-muted"),
+          dim: colorVar("--rgb-text-dim"),
         },
         informed: {
-          DEFAULT: "#10B981",
-          bg: "#052E1A",
-          border: "rgba(16,185,129,0.35)",
+          DEFAULT: colorVar("--rgb-informed"),
+          bg: colorVar("--rgb-informed-bg"),
+          border: colorVar("--rgb-informed-border"),
         },
         uncertain: {
-          DEFAULT: "#F59E0B",
-          bg: "#291A02",
-          border: "rgba(245,158,11,0.35)",
+          DEFAULT: colorVar("--rgb-uncertain"),
+          bg: colorVar("--rgb-uncertain-bg"),
+          border: colorVar("--rgb-uncertain-border"),
         },
         noise: {
-          DEFAULT: "#EF4444",
-          bg: "#2A0808",
-          border: "rgba(239,68,68,0.35)",
+          DEFAULT: colorVar("--rgb-noise"),
+          bg: colorVar("--rgb-noise-bg"),
+          border: colorVar("--rgb-noise-border"),
         },
         prism: {
-          violet: "#7C3AED",
-          blue: "#2563EB",
-          cyan: "#06B6D4",
-          teal: "#10B981",
-          amber: "#F59E0B",
+          violet: colorVar("--rgb-prism-violet"),
+          blue: colorVar("--rgb-prism-blue"),
+          cyan: colorVar("--rgb-prism-cyan"),
+          teal: colorVar("--rgb-prism-teal"),
+          amber: colorVar("--rgb-prism-amber"),
         },
       },
       backgroundImage: {
-        spectrum:
-          "linear-gradient(135deg,#7C3AED 0%,#2563EB 22%,#06B6D4 48%,#10B981 74%,#F59E0B 100%)",
-        page: "linear-gradient(160deg,#0A1628 0%,#04080F 60%)",
-        card: "linear-gradient(135deg,#0F2040 0%,#0A1628 100%)",
+        spectrum: "var(--g-spectrum)",
+        page: "var(--g-page)",
+        card: "var(--g-card)",
       },
       boxShadow: {
-        card: "0 4px 24px rgba(0,0,0,0.45),0 1px 4px rgba(0,0,0,0.3)",
-        modal: "0 16px 64px rgba(0,0,0,0.6),0 4px 16px rgba(0,0,0,0.4)",
-        "glow-informed": "0 0 24px rgba(16,185,129,0.28)",
-        "glow-uncertain": "0 0 24px rgba(245,158,11,0.28)",
-        "glow-noise": "0 0 24px rgba(239,68,68,0.28)",
-        "glow-blue": "0 0 32px rgba(37,99,235,0.35)",
+        card: "var(--shadow-card)",
+        modal: "var(--shadow-modal)",
+        "glow-informed": "var(--shadow-glow-informed)",
+        "glow-uncertain": "var(--shadow-glow-uncertain)",
+        "glow-noise": "var(--shadow-glow-noise)",
+        "glow-blue": "var(--shadow-glow-blue)",
       },
       keyframes: {
         shimmer: {

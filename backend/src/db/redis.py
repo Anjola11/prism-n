@@ -9,8 +9,8 @@ redis_client = Redis.from_url(
     decode_responses=True,
     max_connections=Config.REDIS_MAX_CONNECTIONS,
     health_check_interval=30,
-    socket_connect_timeout=5,
-    socket_timeout=5,
+    socket_connect_timeout=10,
+    socket_timeout=10,
 )
 
 async def check_redis_connection():

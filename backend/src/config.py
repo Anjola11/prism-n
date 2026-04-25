@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     ALLOWED_ORIGINS: list
     REDIS_URL: str
     REDIS_MAX_CONNECTIONS: int = 12
+    REDIS_OPERATION_CONCURRENCY: int = 8
     BREVO_API_KEY: str
     BREVO_SENDER_NAME: str
     BREVO_EMAIL: str 

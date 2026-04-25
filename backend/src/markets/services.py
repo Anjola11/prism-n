@@ -57,6 +57,8 @@ class MarketServices:
     AI_INSIGHT_PLACEHOLDER = "AI insight is warming up."
     DISCOVERY_FEED_CACHE_TTL = 300
     DISCOVERY_FEED_BUILD_LOCK_TTL = 30
+    LIVE_STATE_MARKET_READ_CONCURRENCY = 6
+    TRACKER_EVENT_BUILD_CONCURRENCY = 3
 
     def __init__(
         self,
@@ -77,6 +79,12 @@ class MarketServices:
         self.baseline_services = baseline_services
         self.scoring_services = scoring_services
         self.ai_insight_services = ai_insight_services
+        self._market_read_semaphore = asyncio.Semaphore(self.LIVE_STATE_MARKET_READ_CONCURRENCY)
+        self._tracker_event_build_semaphore = asyncio.Semaphore(self.TRACKER_EVENT_BUILD_CONCURRENCY)
+
+    async def _run_limited(self, semaphore: asyncio.Semaphore, awaitable):
+        async with semaphore:
+            return await awaitable
 
     def _discovery_listings_cache_id(self, *, currency: Currency) -> str:
         return f"discovery-listings:{currency.value}"
@@ -401,21 +409,30 @@ class MarketServices:
         currency: Currency,
         event_liquidity: float | None = None,
     ) -> EventMarketRead:
-        live_market = None
-        live_signal = None
-        if self.live_state:
-            live_market, live_signal = await asyncio.gather(
-                self.live_state.get_market_state(
-                    source=market.source,
-                    market_id=market.market_id,
-                    currency=currency,
-                ),
-                self.live_state.get_signal_state(
-                    source=market.source,
-                    market_id=market.market_id,
-                    currency=currency,
-                ),
-            )
+        async with self._market_read_semaphore:
+            live_market = None
+            live_signal = None
+            if self.live_state:
+                try:
+                    live_market = await self.live_state.get_market_state(
+                        source=market.source,
+                        market_id=market.market_id,
+                        currency=currency,
+                    )
+                    live_signal = await self.live_state.get_signal_state(
+                        source=market.source,
+                        market_id=market.market_id,
+                        currency=currency,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Falling back to persisted market snapshot for %s in %s",
+                        market.market_id,
+                        currency.value,
+                        exc_info=True,
+                    )
+                    live_market = None
+                    live_signal = None
 
         current_probability = getattr(live_market, "current_probability", None)
         if current_probability is None:
@@ -541,11 +558,20 @@ class MarketServices:
         if not self.live_state:
             return None, None
 
-        live_event = await self.live_state.get_event_state(
-            source=source,
-            event_id=event_id,
-            currency=currency,
-        )
+        try:
+            live_event = await self.live_state.get_event_state(
+                source=source,
+                event_id=event_id,
+                currency=currency,
+            )
+        except Exception:
+            logger.warning(
+                "Live event metadata unavailable for %s (%s); falling back to persisted values",
+                event_id,
+                currency.value,
+                exc_info=True,
+            )
+            return None, None
         if not live_event:
             return None, None
         return live_event.total_liquidity, live_event.last_synced_at
@@ -1876,14 +1902,17 @@ class MarketServices:
                 (None, None),
             )
             build_tasks.append(
-                self._build_tracked_event_summary(
-                    event_id=event_id,
-                    markets=markets,
-                    tracked_event=tracked_event_map.get(event_id),
-                    effective_currency=effective_currency,
-                    metric=metric,
-                    live_total_liquidity=live_total_liquidity,
-                    live_last_updated=live_last_updated,
+                self._run_limited(
+                    self._tracker_event_build_semaphore,
+                    self._build_tracked_event_summary(
+                        event_id=event_id,
+                        markets=markets,
+                        tracked_event=tracked_event_map.get(event_id),
+                        effective_currency=effective_currency,
+                        metric=metric,
+                        live_total_liquidity=live_total_liquidity,
+                        live_last_updated=live_last_updated,
+                    ),
                 )
             )
 

@@ -1,0 +1,143 @@
+\documentclass[10pt, letterpaper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[margin=0.5in]{geometry}
+\usepackage{titlesec}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{xcolor}
+\usepackage{tabularx}
+\usepackage{array}
+
+\definecolor{darkblue}{RGB}{0, 51, 102}
+\hypersetup{colorlinks=true, urlcolor=darkblue, linkcolor=darkblue}
+
+\pagestyle{empty}
+\setlength{\parindent}{0pt}
+\setlength{\tabcolsep}{0pt}
+
+\titleformat{\section}{\large\bfseries\uppercase}{}{0pt}{}[\titlerule]
+\titlespacing{\section}{0pt}{8pt}{4pt}
+
+\newcommand{\resumeItem}[1]{\item #1}
+\newcommand{\resumeSubheading}[4]{
+    \begin{tabularx}{\textwidth}{Xr}
+        \textbf{#1} & #2 \\
+        \textit{#3} & \textit{#4} \\
+    \end{tabularx}
+}
+\newcommand{\resumeProject}[4]{
+    \begin{tabularx}{\textwidth}{Xr}
+        \textbf{#1} \hspace{4pt} {\small #2} & #3 \\
+        \multicolumn{2}{l}{\textit{#4}} \\
+    \end{tabularx}
+}
+
+\begin{document}
+
+\begin{center}
+    {\Huge \textbf{Aladeniyi Aanuoluwapo Oluwatosin}} \\
+    \vspace{4pt}
+    \textbf{Backend Engineer | Computer Engineering Student} \\
+    \vspace{4pt}
+    aladeniyiaanu@gmail.com \,|\, +234 905 329 9540 \,|\, \href{https://www.aladeniyiaanu.dev/}{Portfolio} \,|\, \href{https://github.com/Anjola11}{GitHub} \,|\, \href{https://www.linkedin.com/in/aladeniyi-aanu/}{LinkedIn}
+\end{center}
+
+\section{Professional Summary}
+Backend Engineer and Computer Engineering student building real-time, data-intensive systems across fintech, market intelligence, SaaS, and IoT. Strong in Python, FastAPI, PostgreSQL, Redis, async architectures, payment integrations, and translating complex business rules into reliable production APIs spanning secure auth, market scoring, financial workflows, and embedded-to-cloud telemetry.
+
+\section{Education}
+\resumeSubheading
+    {Obafemi Awolowo University (OAU)}{Ile-Ife, Nigeria}
+    {B.Sc. Computer Engineering}{2023 -- 2028 (Expected)}
+\begin{itemize}[leftmargin=0.15in, itemsep=1pt, topsep=2pt]
+    \resumeItem{\textbf{Relevant Coursework:} Data Structures, Algorithms, Database Management Systems, Operating Systems, Computer Architecture.}
+\end{itemize}
+
+\section{Technical Skills}
+\begin{itemize}[leftmargin=0.15in, itemsep=1pt, topsep=2pt]
+    \resumeItem{\textbf{Languages:} Python, SQL, JavaScript, C++, x86 Assembly.}
+    \resumeItem{\textbf{Backend \& Data:} FastAPI, SQLModel, SQLAlchemy, PostgreSQL, Redis, Alembic, asyncpg, HTTPX, APScheduler.}
+    \resumeItem{\textbf{Systems \& Security:} JWT authentication, OTP workflows, refresh token rotation, Redis token blocklisting, rate limiting, row-level locking, WebSockets.}
+    \resumeItem{\textbf{Payments \& Integrations:} Interswitch APIs, REST integrations, Cloudinary media pipelines, email/OTP delivery, background workers.}
+    \resumeItem{\textbf{Embedded \& Engineering Strengths:} ESP32, PlatformIO, sensor telemetry, real-time data pipelines, market scoring systems, FIFO allocation logic, query optimization.}
+\end{itemize}
+
+\section{Selected Projects}
+\resumeProject
+    {Prism}{| Predictive Market Intelligence Engine}
+    {2026 -- Present}
+    {FastAPI, PostgreSQL, Redis, WebSockets}
+\begin{itemize}[leftmargin=0.15in, itemsep=1pt, topsep=2pt]
+    \resumeItem{Built a real-time intelligence platform that aggregates fragmented prediction market data from multiple sources, including Bayse and Polymarket, into a unified analysis layer.}
+    \resumeItem{Designed a scoring pipeline that normalizes CLOB and AMM market microstructure into comparable 0--100 conviction signals using async workers, baseline refresh schedulers, Redis-backed live state, and persistent signal snapshots.}
+\end{itemize}
+
+\resumeProject
+    {Agriflow}{| Agricultural Finance \& Farm Funding Platform}
+    {2026}
+    {FastAPI, PostgreSQL, Redis, Interswitch, Cloudinary}
+\begin{itemize}[leftmargin=0.15in, itemsep=1pt, topsep=2pt]
+    \resumeItem{Built core backend flows for a farm-investment platform connecting verified farmers and investors, including farm listing validation, milestone-based funding, harvest reporting, repayment, and payout generation.}
+    \resumeItem{Integrated Interswitch identity and payment APIs for BVN verification, credit-history-backed trust scoring, bank-account resolution, investment checkout, and repayment verification with Redis-cached gateway tokens.}
+    \resumeItem{Engineered safeguards for overfunding, GPS-based milestone proof checks, automated milestone unlocking, payout splitting, and hackathon-mode payment scaling to work within sandbox gateway limits.}
+\end{itemize}
+
+\resumeProject
+    {KennyFasa}{| Enterprise Bookkeeping \& Business Management System}
+    {2025 -- Present}
+    {FastAPI, PostgreSQL, Redis, SQLModel}
+\begin{itemize}[leftmargin=0.15in, itemsep=1pt, topsep=2pt]
+    \resumeItem{Engineered a bookkeeping platform with FIFO debt allocation, automated credit handling, and price snapshotting to preserve historical transaction integrity.}
+    \resumeItem{Implemented row-level locking to prevent balance corruption during concurrent payment processing and built secure multi-client authentication with token revocation.}
+\end{itemize}
+
+\resumeProject
+    {NLCF Hub}{| Membership Operations Platform}
+    {2026}
+    {FastAPI, PostgreSQL, Redis, Cloudinary, Brevo}
+\begin{itemize}[leftmargin=0.15in, itemsep=1pt, topsep=2pt]
+    \resumeItem{Built an end-to-end member management platform with email OTP verification, admin approval workflows, cookie-based JWT authentication, refresh token rotation, and Redis token blocklisting.}
+    \resumeItem{Engineered media and profile workflows with MIME-aware upload validation, Cloudinary storage, eager-loaded relationship queries, filtered approval queues, and aggregated operational statistics for admins.}
+\end{itemize}
+
+\resumeProject
+    {SMD}{| Wireless Soil Moisture Monitoring System}
+    {2026}
+    {ESP32, C++, FastAPI, PostgreSQL}
+\begin{itemize}[leftmargin=0.15in, itemsep=1pt, topsep=2pt]
+    \resumeItem{Wrote custom ESP32 firmware that converts analog sensor readings into calibrated moisture percentages, updates an LCD locally, and transmits telemetry over Wi-Fi/HTTPS to a cloud backend.}
+    \resumeItem{Added fault-tolerant offline behavior and built FastAPI ingestion plus APScheduler cleanup jobs that keep telemetry data flowing while constraining database growth in a low-resource deployment.}
+\end{itemize}
+
+\resumeProject
+    {Dvota}{| Secure E-Voting Platform}{2025}
+    {FastAPI, PostgreSQL}
+\begin{itemize}[leftmargin=0.15in, itemsep=1pt, topsep=2pt]
+    \resumeItem{Built a secure voting workflow with custom rate limiting, session protection, and refresh token rotation for safer election participation.}
+    \resumeItem{Resolved N+1 query bottlenecks with \texttt{selectinload}, reducing key endpoint latency from roughly 500ms to 300ms.}
+\end{itemize}
+
+\section{Professional Experience}
+\resumeSubheading
+    {Student Work Experience Program (SWEP)}{Aug 2025 -- Sept 2025}
+    {Project Manager}{Nigeria}
+\begin{itemize}[leftmargin=0.15in, itemsep=1pt, topsep=2pt]
+    \resumeItem{Led a cross-functional team that developed a digital attendance system using QR-based verification.}
+    \resumeItem{Authored core technical documents, including Software Requirements Specification and system design artifacts.}
+\end{itemize}
+
+\resumeSubheading
+    {HNG Internship}{2025}
+    {Backend Developer Intern}{Remote}
+\begin{itemize}[leftmargin=0.15in, itemsep=1pt, topsep=2pt]
+    \resumeItem{Progressed to Stage 3 by delivering scalable FastAPI services under tight review cycles and production-style engineering standards.}
+\end{itemize}
+
+\resumeSubheading
+    {Blossom Academy}{Nov 2025 -- Present}
+    {Online Mathematics Tutor}{Remote}
+Teach analytical problem-solving and communicate complex concepts clearly, strengthening technical explanation and mentoring skills.
+
+\end{document}
