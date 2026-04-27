@@ -1,12 +1,82 @@
 import React, { useLayoutEffect, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate, useParams, useSearch } from '@tanstack/react-router';
-import { Activity, ArrowLeft, Droplets, Sparkles, TrendingDown, TrendingUp, Users, Zap } from 'lucide-react';
+import { Activity, ArrowLeft, Droplets, ExternalLink, Sparkles, TrendingDown, TrendingUp, Users, Zap } from 'lucide-react';
 import gsap from 'gsap';
 
 import { marketsApi } from '../../lib/api/markets';
-import type { EventDetailApi } from '../../lib/api/types';
+import type { EventDetailApi, EventMarketApi } from '../../lib/api/types';
 import { formatCurrencyCompact, formatRelative } from '../../lib/format';
+
+function resolveMarketFocus(market: EventMarketApi | null | undefined) {
+  if (!market) {
+    return {
+      side: 'YES',
+      label: 'YES',
+      probability: null as number | null,
+    };
+  }
+
+  if (market.probability_delta > 0 || market.signal.direction === 'RISING') {
+    return {
+      side: 'YES',
+      label: market.yes_outcome_label || 'YES',
+      probability: market.current_probability,
+    };
+  }
+
+  if (market.probability_delta < 0 || market.signal.direction === 'FALLING') {
+    return {
+      side: 'NO',
+      label: market.no_outcome_label || 'NO',
+      probability: market.inverse_probability,
+    };
+  }
+
+  if (
+    typeof market.current_probability === 'number' &&
+    typeof market.inverse_probability === 'number' &&
+    market.inverse_probability > market.current_probability
+  ) {
+    return {
+      side: 'NO',
+      label: market.no_outcome_label || 'NO',
+      probability: market.inverse_probability,
+    };
+  }
+
+  return {
+    side: 'YES',
+    label: market.yes_outcome_label || 'YES',
+    probability: market.current_probability,
+  };
+}
+
+function getTradeSourceUrl(event: EventDetailApi | null) {
+  if (!event) {
+    return null;
+  }
+
+  const normalizedSource = event.source?.toUpperCase?.() || '';
+  const slugCandidate =
+    event.event_slug ||
+    event.event_title
+      ?.toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '') ||
+    event.event_id;
+
+  if (normalizedSource === 'BAYSE') {
+    return `https://app.bayse.markets/market/${event.event_id}`;
+  }
+
+  if (normalizedSource === 'POLYMARKET') {
+    return `https://polymarket.com/event/${slugCandidate}`;
+  }
+
+  return null;
+}
 
 export function EventDetail() {
   const { eventId } = useParams({ strict: false }) as { eventId: string };
@@ -59,6 +129,9 @@ export function EventDetail() {
 
   const selectedOutcome = event?.markets.find((market) => market.market_id === activeTabId) || event?.markets[0];
   const eventLeader = event?.highest_scoring_market || null;
+  const leaderFocusLabel = eventLeader?.focus_outcome_label || eventLeader?.focus_outcome_side || null;
+  const selectedFocus = React.useMemo(() => resolveMarketFocus(selectedOutcome), [selectedOutcome]);
+  const tradeSourceUrl = React.useMemo(() => getTradeSourceUrl(event), [event]);
   const selectedMarketFlow = (selectedOutcome?.buy_notional || 0) + (selectedOutcome?.sell_notional || 0);
   const hasObservedFlow =
     (selectedOutcome?.buy_notional || 0) > 0 || (selectedOutcome?.sell_notional || 0) > 0;
@@ -69,6 +142,61 @@ export function EventDetail() {
     const deduped = Array.from(new Set(notes));
     return deduped;
   }, [selectedOutcome?.signal.notes]);
+  const tradeThesis = React.useMemo(() => {
+    if (!selectedOutcome) {
+      return null;
+    }
+
+    const score = selectedOutcome.signal.score;
+    const confidence =
+      score >= 70 ? 'Strong conviction' : score >= 40 ? 'Moderate conviction' : 'Weak conviction';
+    const traderStance =
+      score >= 70
+        ? 'Momentum is believable enough to trade with, as long as the order flow keeps supporting it.'
+        : score >= 40
+          ? 'There is a usable read here, but it still needs confirmation before taking serious size.'
+          : 'This is better treated as a watchlist setup than a clean trade signal right now.';
+
+    const support: string[] = [];
+    if (selectedOutcome.probability_delta > 0.01) {
+      support.push(`price is expanding toward ${selectedFocus.label}`);
+    } else if (selectedOutcome.probability_delta < -0.01) {
+      support.push(`price is backing away from ${selectedOutcome.yes_outcome_label}, which strengthens ${selectedFocus.label}`);
+    } else {
+      support.push('price is not expanding much yet');
+    }
+
+    if ((selectedOutcome.buy_notional || 0) > (selectedOutcome.sell_notional || 0)) {
+      support.push('buy flow is outweighing sell flow');
+    } else if ((selectedOutcome.sell_notional || 0) > (selectedOutcome.buy_notional || 0)) {
+      support.push('sell flow is heavier than buy flow');
+    } else if (displaySelectedFlow > 0) {
+      support.push('there is activity, but not a clean flow imbalance yet');
+    }
+
+    if (selectedOutcome.signal.direction === 'RISING') {
+      support.push('the live direction is still rising');
+    } else if (selectedOutcome.signal.direction === 'FALLING') {
+      support.push('the live direction is rolling over');
+    } else {
+      support.push('the live direction is flat for now');
+    }
+
+    const invalidate =
+      selectedFocus.side === 'YES'
+        ? 'Invalidate the long idea if delta flips negative, the score fades more, or sell flow starts dominating.'
+        : 'Invalidate the fade idea if delta flips back up, the score firms up, or buy flow retakes control.';
+
+    return {
+      bias: `${selectedFocus.label} on ${selectedOutcome.market_title}`,
+      confidence,
+      traderStance,
+      support: support.slice(0, 3),
+      invalidate,
+      focusProbability:
+        typeof selectedFocus.probability === 'number' ? Math.round(selectedFocus.probability * 100) : null,
+    };
+  }, [displaySelectedFlow, selectedFocus, selectedOutcome]);
 
   useLayoutEffect(() => {
     if (!event || !selectedOutcome) return;
@@ -144,6 +272,15 @@ export function EventDetail() {
           <span className="ml-auto font-mono text-xs text-text-muted">
             {isAnalyzing ? 'Analyzing live state...' : `Updated ${formatRelative(event.last_updated)}`}
           </span>
+          {tradeSourceUrl && (
+            <button
+              type="button"
+              onClick={() => window.open(tradeSourceUrl, '_blank', 'noopener,noreferrer')}
+              className="inline-flex items-center gap-2 rounded border border-prism-blue/30 bg-navy px-3 py-1.5 font-mono text-[11px] uppercase tracking-wide text-prism-cyan transition-colors hover:border-prism-blue hover:text-text-primary"
+            >
+              View trade on {event.source} <ExternalLink size={12} />
+            </button>
+          )}
         </div>
       </div>
 
@@ -161,6 +298,11 @@ export function EventDetail() {
               <div className="mt-2 break-words font-body text-base leading-7 text-text-primary sm:text-lg">
                 {eventLeader.market_title}
               </div>
+              {leaderFocusLabel && (
+                <div className="mt-2 font-mono text-[11px] uppercase tracking-[0.18em] text-prism-cyan">
+                  Focus side: {leaderFocusLabel}
+                </div>
+              )}
               <div className="mt-2 font-mono text-[11px] text-text-secondary">
                 The overall event heat is led by score, not by order count alone.
               </div>
@@ -194,6 +336,48 @@ export function EventDetail() {
           {event.ai_insight || 'AI insight unavailable'}
         </blockquote>
       </div>
+
+      {tradeThesis && (
+        <div className="rounded-2xl border border-border bg-card p-5 sm:p-6">
+          <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-text-muted">Trade Thesis</div>
+              <h2 className="mt-2 font-heading text-lg text-text-primary sm:text-xl">{tradeThesis.bias}</h2>
+            </div>
+            <div className={`rounded border px-3 py-1 font-mono text-xs font-bold shadow-sm ${getScoreColor(selectedOutcome.signal.score)}`}>
+              {tradeThesis.confidence}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+            <div className="rounded-xl border border-border/60 bg-navy p-4">
+              <div className="font-mono text-[10px] uppercase tracking-wider text-text-muted">What Prism is saying</div>
+              <p className="mt-3 font-body text-sm leading-7 text-text-primary/90">{tradeThesis.traderStance}</p>
+            </div>
+
+            <div className="rounded-xl border border-border/60 bg-navy p-4">
+              <div className="font-mono text-[10px] uppercase tracking-wider text-text-muted">What supports it</div>
+              <div className="mt-3 flex flex-col gap-2">
+                {tradeThesis.support.map((item) => (
+                  <p key={item} className="font-body text-sm leading-7 text-text-primary/90">
+                    {item}
+                  </p>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-border/60 bg-navy p-4">
+              <div className="font-mono text-[10px] uppercase tracking-wider text-text-muted">What would invalidate it</div>
+              <p className="mt-3 font-body text-sm leading-7 text-text-primary/90">{tradeThesis.invalidate}</p>
+              {tradeThesis.focusProbability !== null && (
+                <div className="mt-4 font-mono text-[11px] uppercase tracking-wide text-prism-cyan">
+                  Focus side priced near {tradeThesis.focusProbability}%
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="mt-4 border-b border-border/50">
         <div className="hide-scrollbar flex gap-2 overflow-x-auto pb-1">
@@ -269,7 +453,7 @@ export function EventDetail() {
               </div>
               <div className="flex min-w-0 flex-col items-center justify-center border-b border-border/60 px-2 pb-4 text-center sm:border-b-0 sm:px-4 sm:pb-0">
                 <span className="mb-1 break-words text-center font-mono text-2xl font-bold leading-tight text-text-primary sm:text-xl lg:text-2xl">
-                  {displaySelectedFlow > 0 ? formatCurrencyCompact(event.currency, displaySelectedFlow) : '—'}
+                  {displaySelectedFlow > 0 ? formatCurrencyCompact(event.currency, displaySelectedFlow) : 'N/A'}
                 </span>
                 <span className="flex flex-wrap items-center justify-center gap-1 text-center font-mono text-[10px] uppercase text-text-muted">
                   <Activity size={10} /> Selected Flow
@@ -382,3 +566,4 @@ export function EventDetail() {
     </div>
   );
 }
+

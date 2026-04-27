@@ -82,6 +82,88 @@ class MarketServices:
         self._market_read_semaphore = asyncio.Semaphore(self.LIVE_STATE_MARKET_READ_CONCURRENCY)
         self._tracker_event_build_semaphore = asyncio.Semaphore(self.TRACKER_EVENT_BUILD_CONCURRENCY)
 
+    async def _safe_get_read_model(self, *, namespace: str, identifier: str):
+        if not self.live_state:
+            return None
+        try:
+            return await self.live_state.get_read_model(
+                namespace=namespace,
+                identifier=identifier,
+            )
+        except Exception:
+            logger.warning(
+                "Read-model cache read failed for namespace=%s identifier=%s",
+                namespace,
+                identifier,
+                exc_info=True,
+            )
+            return None
+
+    async def _safe_set_read_model(
+        self,
+        *,
+        namespace: str,
+        identifier: str,
+        payload,
+        ttl_seconds: int | None = None,
+    ) -> None:
+        if not self.live_state:
+            return
+        try:
+            await self.live_state.set_read_model(
+                namespace=namespace,
+                identifier=identifier,
+                payload=payload,
+                ttl_seconds=ttl_seconds,
+            )
+        except Exception:
+            logger.warning(
+                "Read-model cache write failed for namespace=%s identifier=%s",
+                namespace,
+                identifier,
+                exc_info=True,
+            )
+
+    async def _safe_delete_read_model(self, *, namespace: str, identifier: str) -> None:
+        if not self.live_state:
+            return
+        try:
+            await self.live_state.delete_read_model(
+                namespace=namespace,
+                identifier=identifier,
+            )
+        except Exception:
+            logger.warning(
+                "Read-model cache delete failed for namespace=%s identifier=%s",
+                namespace,
+                identifier,
+                exc_info=True,
+            )
+
+    async def _safe_acquire_coordination_lock(
+        self,
+        *,
+        namespace: str,
+        identifier: str,
+        ttl_seconds: int,
+    ) -> bool:
+        if not self.live_state:
+            return False
+        try:
+            return await self.live_state.acquire_coordination_lock(
+                namespace=namespace,
+                identifier=identifier,
+                ttl_seconds=ttl_seconds,
+            )
+        except Exception:
+            logger.warning(
+                "Coordination lock failed for namespace=%s identifier=%s",
+                namespace,
+                identifier,
+                exc_info=True,
+            )
+            return False
+
     async def _run_limited(self, semaphore: asyncio.Semaphore, awaitable):
         async with semaphore:
             return await awaitable
@@ -96,7 +178,7 @@ class MarketServices:
         return f"event-detail:{event_id}:{currency.value}"
 
     def _event_ai_insight_cache_id(self, *, event_id: str, currency: Currency) -> str:
-        return f"event-ai-insight:v2:{event_id}:{currency.value}"
+        return f"event-ai-insight:v3:{event_id}:{currency.value}"
 
     def _is_missing_ai_insight(self, ai_insight: str | None) -> bool:
         if not ai_insight or not ai_insight.strip():
@@ -155,15 +237,17 @@ class MarketServices:
                     note = raw_note.strip().rstrip(".")
                     break
 
+        focus_descriptor = self._format_focus_descriptor(leader)
+
         if data_mode == "tracked_live":
             return (
-                f"Right now, Prism sees the clearest pressure in '{leader.market_title}', with the market leaning around {probability_text}. "
+                f"Right now, Prism sees the clearest pressure in '{focus_descriptor}', with the market leaning around {probability_text}. "
                 f"The move is {move_text} and the current score suggests {conviction_text}"
                 + (f" because {note.lower()}." if note else ".")
             )[:400]
 
         return (
-            f"At first glance, '{leader.market_title}' is the outcome Prism would watch first, with the market sitting near {probability_text}. "
+            f"At first glance, '{focus_descriptor}' is the outcome Prism would watch first, with the market sitting near {probability_text}. "
             f"This is still a lighter snapshot, so treat it as an early clue rather than a finished live call"
             + (f" - especially since {note.lower()}." if note else ".")
         )[:400]
@@ -312,7 +396,7 @@ class MarketServices:
 
         for _ in range(12):
             await asyncio.sleep(0.25)
-            cached = await self.live_state.get_read_model(
+            cached = await self._safe_get_read_model(
                 namespace="discovery-feed",
                 identifier=currency.value,
             )
@@ -490,6 +574,37 @@ class MarketServices:
             ]
         )
 
+    def _resolve_focus_outcome(
+        self,
+        *,
+        current_probability: float | None,
+        inverse_probability: float | None,
+        probability_delta: float,
+        signal_direction: str | None,
+        yes_outcome_label: str | None,
+        no_outcome_label: str | None,
+    ) -> tuple[str, str, float | None, float]:
+        normalized_direction = (signal_direction or "").upper()
+        yes_label = (yes_outcome_label or "YES").strip() or "YES"
+        no_label = (no_outcome_label or "NO").strip() or "NO"
+
+        if probability_delta > 0 or normalized_direction == "RISING":
+            return "YES", yes_label, current_probability, probability_delta
+
+        if probability_delta < 0 or normalized_direction == "FALLING":
+            return "NO", no_label, inverse_probability, abs(probability_delta)
+
+        if current_probability is not None and inverse_probability is not None:
+            if current_probability >= inverse_probability:
+                return "YES", yes_label, current_probability, 0.0
+            return "NO", no_label, inverse_probability, 0.0
+
+        return "YES", yes_label, current_probability, max(probability_delta, 0.0)
+
+    def _format_focus_descriptor(self, leader: HighestScoringMarketRead) -> str:
+        focus_label = (leader.focus_outcome_label or leader.focus_outcome_side or "YES").strip()
+        return f"{leader.market_title} ({focus_label})"
+
     def _build_highest_scoring_market(
         self,
         markets: list[EventMarketRead],
@@ -504,11 +619,21 @@ class MarketServices:
                 item.current_probability if item.current_probability is not None else -1.0,
             ),
         )
+        focus_side, focus_label, focus_probability, focus_delta = self._resolve_focus_outcome(
+            current_probability=highest.current_probability,
+            inverse_probability=highest.inverse_probability,
+            probability_delta=highest.probability_delta,
+            signal_direction=highest.signal.direction,
+            yes_outcome_label=highest.yes_outcome_label,
+            no_outcome_label=highest.no_outcome_label,
+        )
         return HighestScoringMarketRead(
             market_id=highest.market_id,
             market_title=highest.market_title,
-            current_probability=highest.current_probability,
-            probability_delta=highest.probability_delta,
+            focus_outcome_side=focus_side,
+            focus_outcome_label=focus_label,
+            current_probability=focus_probability,
+            probability_delta=focus_delta,
             signal=highest.signal,
         )
 
@@ -755,15 +880,15 @@ class MarketServices:
         return HighestScoringMarketRead(
             market_id=candidate.market_id,
             market_title=candidate.market_title,
+            focus_outcome_side="YES",
+            focus_outcome_label=candidate.yes_outcome_label,
             current_probability=candidate.current_probability,
             probability_delta=0.0,
             signal=SignalRead(),
         )
 
     async def _get_cached_discovery_listings(self, *, currency: Currency) -> list[dict] | None:
-        if not self.live_state:
-            return None
-        payload = await self.live_state.get_read_model(
+        payload = await self._safe_get_read_model(
             namespace="discovery-listings",
             identifier=self._discovery_listings_cache_id(currency=currency),
         )
@@ -772,9 +897,7 @@ class MarketServices:
         return payload
 
     async def _set_cached_discovery_listings(self, *, currency: Currency, events: list[dict]) -> None:
-        if not self.live_state:
-            return
-        await self.live_state.set_read_model(
+        await self._safe_set_read_model(
             namespace="discovery-listings",
             identifier=self._discovery_listings_cache_id(currency=currency),
             payload=events,
@@ -861,6 +984,8 @@ class MarketServices:
                     highest_scoring_market=HighestScoringMarketRead(
                         market_id=str(first_market.get("id") or ""),
                         market_title=first_market.get("title", ""),
+                        focus_outcome_side="YES",
+                        focus_outcome_label=first_market.get("outcome1Label", "YES"),
                         current_probability=first_market.get("outcome1Price"),
                         probability_delta=0.0,
                         signal=SignalRead(),
@@ -877,6 +1002,7 @@ class MarketServices:
             total_liquidity = event_payload.get("liquidity")
             if total_liquidity is None:
                 total_liquidity = event_payload.get("liquidityClob")
+            yes_label, no_label, yes_price, _, _, _ = self._parse_polymarket_outcomes(first_market) if first_market else ("Yes", "No", None, None, None, None)
             fallback_cards.append(
                 DiscoveryEventRead(
                     event_id=event_id,
@@ -907,7 +1033,9 @@ class MarketServices:
                     highest_scoring_market=HighestScoringMarketRead(
                         market_id=str(first_market.get("id") or ""),
                         market_title=first_market.get("question") or first_market.get("slug") or event_payload.get("title", ""),
-                        current_probability=None,
+                        focus_outcome_side="YES",
+                        focus_outcome_label=yes_label,
+                        current_probability=yes_price,
                         probability_delta=0.0,
                         signal=SignalRead(),
                     ) if first_market else None,
@@ -928,9 +1056,7 @@ class MarketServices:
         return fallback_cards
 
     async def _get_cached_tracker_response(self, *, user_id: UUID, currency: Currency) -> list[TrackedEventRead] | None:
-        if not self.live_state:
-            return None
-        payload = await self.live_state.get_read_model(
+        payload = await self._safe_get_read_model(
             namespace="tracker-feed",
             identifier=self._tracker_cache_id(user_id=user_id, currency=currency),
         )
@@ -945,9 +1071,7 @@ class MarketServices:
         currency: Currency,
         response: list[TrackedEventRead],
     ) -> None:
-        if not self.live_state:
-            return
-        await self.live_state.set_read_model(
+        await self._safe_set_read_model(
             namespace="tracker-feed",
             identifier=self._tracker_cache_id(user_id=user_id, currency=currency),
             payload=[item.model_dump(mode="json") for item in response],
@@ -955,9 +1079,7 @@ class MarketServices:
         )
 
     async def _get_cached_event_detail(self, *, event_id: str, currency: Currency) -> EventDetailRead | None:
-        if not self.live_state:
-            return None
-        payload = await self.live_state.get_read_model(
+        payload = await self._safe_get_read_model(
             namespace="event-detail",
             identifier=self._event_detail_cache_id(event_id=event_id, currency=currency),
         )
@@ -966,9 +1088,7 @@ class MarketServices:
         return EventDetailRead.model_validate(payload)
 
     async def _set_cached_event_detail(self, *, event_detail: EventDetailRead) -> None:
-        if not self.live_state:
-            return
-        await self.live_state.set_read_model(
+        await self._safe_set_read_model(
             namespace="event-detail",
             identifier=self._event_detail_cache_id(event_id=event_detail.event_id, currency=event_detail.currency),
             payload=event_detail.model_dump(mode="json"),
@@ -976,9 +1096,7 @@ class MarketServices:
         )
 
     async def _get_cached_event_ai_insight(self, *, event_id: str, currency: Currency) -> str | None:
-        if not self.live_state:
-            return None
-        payload = await self.live_state.get_read_model(
+        payload = await self._safe_get_read_model(
             namespace="event-ai-insight",
             identifier=self._event_ai_insight_cache_id(event_id=event_id, currency=currency),
         )
@@ -990,9 +1108,7 @@ class MarketServices:
         return insight
 
     async def _set_cached_event_ai_insight(self, *, event_id: str, currency: Currency, ai_insight: str) -> None:
-        if not self.live_state:
-            return
-        await self.live_state.set_read_model(
+        await self._safe_set_read_model(
             namespace="event-ai-insight",
             identifier=self._event_ai_insight_cache_id(event_id=event_id, currency=currency),
             payload={"ai_insight": ai_insight},
@@ -1006,17 +1122,15 @@ class MarketServices:
         event_id: str,
         currency: Currency,
     ) -> None:
-        if not self.live_state:
-            return
-        await self.live_state.delete_read_model(
+        await self._safe_delete_read_model(
             namespace="tracker-feed",
             identifier=self._tracker_cache_id(user_id=user_id, currency=currency),
         )
-        await self.live_state.delete_read_model(
+        await self._safe_delete_read_model(
             namespace="event-detail",
             identifier=self._event_detail_cache_id(event_id=event_id, currency=currency),
         )
-        await self.live_state.delete_read_model(
+        await self._safe_delete_read_model(
             namespace="event-ai-insight",
             identifier=self._event_ai_insight_cache_id(event_id=event_id, currency=currency),
         )
@@ -1027,17 +1141,15 @@ class MarketServices:
         event_id: str,
         currency: Currency,
     ) -> None:
-        if not self.live_state:
-            return
-        await self.live_state.delete_read_model(
+        await self._safe_delete_read_model(
             namespace="discovery-listings",
             identifier=self._discovery_listings_cache_id(currency=currency),
         )
-        await self.live_state.delete_read_model(
+        await self._safe_delete_read_model(
             namespace="event-detail",
             identifier=self._event_detail_cache_id(event_id=event_id, currency=currency),
         )
-        await self.live_state.delete_read_model(
+        await self._safe_delete_read_model(
             namespace="event-ai-insight",
             identifier=self._event_ai_insight_cache_id(event_id=event_id, currency=currency),
         )
@@ -1092,7 +1204,7 @@ class MarketServices:
             return event_detail.model_copy(update={"ai_insight": cached_ai_insight})
 
         if self.live_state:
-            lock_acquired = await self.live_state.acquire_coordination_lock(
+            lock_acquired = await self._safe_acquire_coordination_lock(
                 namespace="event-ai-insight-generate",
                 identifier=self._event_ai_insight_cache_id(
                     event_id=event_detail.event_id,
@@ -1959,7 +2071,7 @@ class MarketServices:
         # Check cache first
         cache_id = f"system-{currency.value}"
         if self.live_state:
-            cached = await self.live_state.get_read_model(
+            cached = await self._safe_get_read_model(
                 namespace="tracker-feed",
                 identifier=cache_id,
             )
@@ -2021,7 +2133,7 @@ class MarketServices:
 
         # Cache the response
         if self.live_state:
-            await self.live_state.set_read_model(
+            await self._safe_set_read_model(
                 namespace="tracker-feed",
                 identifier=cache_id,
                 payload=[item.model_dump(mode="json") for item in response],
@@ -2228,7 +2340,7 @@ class MarketServices:
         logger.info("Fetching discovery feed for user %s in %s", user_id, currency.value)
 
         # Read the pre-built feed from Redis (written by DiscoveryWorker)
-        cached = await self.live_state.get_read_model(
+        cached = await self._safe_get_read_model(
             namespace="discovery-feed",
             identifier=currency.value,
         ) if self.live_state else None
@@ -2240,7 +2352,7 @@ class MarketServices:
             )
             build_locally = True
             if self.live_state:
-                lock_acquired = await self.live_state.acquire_coordination_lock(
+                lock_acquired = await self._safe_acquire_coordination_lock(
                     namespace="discovery-feed-build",
                     identifier=currency.value,
                     ttl_seconds=self.DISCOVERY_FEED_BUILD_LOCK_TTL,
@@ -2260,7 +2372,7 @@ class MarketServices:
                 )
                 cached = [item.model_dump(mode="json") for item in fallback_cards]
                 if self.live_state:
-                    await self.live_state.set_read_model(
+                    await self._safe_set_read_model(
                         namespace="discovery-feed",
                         identifier=currency.value,
                         payload=cached,
@@ -2361,7 +2473,7 @@ class MarketServices:
         logger.info("Fetching system discovery feed in %s", currency.value)
 
         # Read the pre-built feed from Redis (written by DiscoveryWorker)
-        cached = await self.live_state.get_read_model(
+        cached = await self._safe_get_read_model(
             namespace="discovery-feed",
             identifier=currency.value,
         ) if self.live_state else None
@@ -2373,7 +2485,7 @@ class MarketServices:
             )
             build_locally = True
             if self.live_state:
-                lock_acquired = await self.live_state.acquire_coordination_lock(
+                lock_acquired = await self._safe_acquire_coordination_lock(
                     namespace="discovery-feed-build",
                     identifier=currency.value,
                     ttl_seconds=self.DISCOVERY_FEED_BUILD_LOCK_TTL,
@@ -2393,7 +2505,7 @@ class MarketServices:
                 )
                 cached = [item.model_dump(mode="json") for item in fallback_cards]
                 if self.live_state:
-                    await self.live_state.set_read_model(
+                    await self._safe_set_read_model(
                         namespace="discovery-feed",
                         identifier=currency.value,
                         payload=cached,

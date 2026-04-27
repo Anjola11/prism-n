@@ -36,6 +36,8 @@ export interface SignalApi {
 export interface HighestScoringMarketApi {
   market_id: string;
   market_title: string;
+  focus_outcome_side?: string | null;
+  focus_outcome_label?: string | null;
   current_probability: number | null;
   probability_delta: number;
   signal: SignalApi;
@@ -159,6 +161,8 @@ export interface AdminActionLogApi {
 export interface HighestScoringMarketViewModel {
   marketId: string;
   marketTitle: string;
+  focusOutcomeSide: string | null;
+  focusOutcomeLabel: string | null;
   currentProbability: number | null;
   probabilityDelta: number;
   signal: SignalApi;

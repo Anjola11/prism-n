@@ -69,17 +69,15 @@ export function LoginPage() {
               <button 
                 type="button" 
                 onClick={() => navigate({ to: '/auth/forgot-password' })}
-                className="text-prism-blue/60 hover:text-prism-blue cursor-pointer lowercase"
-              >
-                forgot?
-              </button>
+                className="cursor-pointer text-prism-blue/70 hover:text-prism-blue"
+              >Forgot password?</button>
             </label>
             <div className="relative">
               <input 
                 type={showPassword ? 'text' : 'password'} 
                 value={formData.password}
                 onChange={(e) => setFormData(p => ({ ...p, password: e.target.value }))}
-                placeholder="••••••••"
+                placeholder="........"
                 className="w-full bg-navy border border-border rounded-lg pl-4 pr-10 py-2.5 text-text-primary text-sm font-mono focus:border-prism-blue focus:outline-none transition-colors"
                 required
               />
@@ -103,3 +101,4 @@ export function LoginPage() {
     </div>
   );
 }
+

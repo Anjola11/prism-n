@@ -17,6 +17,8 @@ export function SignalCard({ event, onTrack, isTracked = false, isTrackPending =
   const [iconFailed, setIconFailed] = React.useState(false);
   const topMarket = event.highestScoringMarket;
   const signal = topMarket?.signal;
+  const topMarketFocusLabel = topMarket?.focusOutcomeLabel || topMarket?.focusOutcomeSide || null;
+  const topMarketDescriptor = topMarketFocusLabel ? `${topMarket?.marketTitle} (${topMarketFocusLabel})` : topMarket?.marketTitle;
 
   const isHighSignal = signal?.classification === 'high_conviction' || signal?.classification === 'strong';
   const isModerateSignal = signal?.classification === 'moderate';
@@ -69,16 +71,16 @@ export function SignalCard({ event, onTrack, isTracked = false, isTrackPending =
 
     if (isTrackedAwaitingSignal) {
       return (
-        `Prism is tracking '${topMarket.marketTitle}' live, and the market is currently leaning around ${probabilityText}. ` +
+        `Prism is tracking '${topMarketDescriptor}' live, and the market is currently leaning around ${probabilityText}. ` +
         (note ? `The first thing standing out is ${note.toLowerCase()}.` : 'The first live read is still settling in.')
       );
     }
 
     return (
-      `At first glance, '${topMarket.marketTitle}' is the outcome Prism would watch first, with the market sitting near ${probabilityText}. ` +
+      `At first glance, '${topMarketDescriptor}' is the outcome Prism would watch first, with the market sitting near ${probabilityText}. ` +
       (note ? `Early clue: ${note}.` : 'Treat this as an early clue until the event is being tracked live.')
     );
-  }, [isTrackedAwaitingSignal, signal?.notes, topMarket]);
+  }, [isTrackedAwaitingSignal, signal?.notes, topMarket, topMarketDescriptor]);
 
   const handleCardClick = () => {
     navigate({ to: `/app/events/${event.id}`, search: { source: event.source.toLowerCase() } });
@@ -123,11 +125,11 @@ export function SignalCard({ event, onTrack, isTracked = false, isTrackPending =
       <div className="relative z-10 mb-4">
         {event.eventType === 'combined' && topMarket ? (
           <p className="font-mono text-xs text-prism-teal">
-            Spiking on: {topMarket.marketTitle} (Score: {signal?.score ?? 0})
+            Spiking on: {topMarketDescriptor} (Score: {signal?.score ?? 0})
           </p>
         ) : (
           <p className="mt-0.5 font-mono text-[10px] text-text-muted">
-            {topMarket ? `Moving on: ${topMarket.marketTitle}` : 'Signal still warming up'}
+            {topMarket ? `Moving on: ${topMarketDescriptor}` : 'Signal still warming up'}
           </p>
         )}
       </div>

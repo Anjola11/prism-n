@@ -13,6 +13,8 @@ function mapHighestScoringMarket(apiEvent: DiscoveryEventApi): HighestScoringMar
   return {
     marketId: topMarket.market_id,
     marketTitle: topMarket.market_title,
+    focusOutcomeSide: topMarket.focus_outcome_side ?? null,
+    focusOutcomeLabel: topMarket.focus_outcome_label ?? null,
     currentProbability: topMarket.current_probability,
     probabilityDelta: topMarket.probability_delta,
     signal: topMarket.signal,

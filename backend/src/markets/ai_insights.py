@@ -60,6 +60,8 @@ class AIInsightServices:
                 {
                     "market_id": event_detail.highest_scoring_market.market_id,
                     "market_title": event_detail.highest_scoring_market.market_title,
+                    "focus_outcome_side": event_detail.highest_scoring_market.focus_outcome_side,
+                    "focus_outcome_label": event_detail.highest_scoring_market.focus_outcome_label,
                     "current_probability": event_detail.highest_scoring_market.current_probability,
                     "probability_delta": event_detail.highest_scoring_market.probability_delta,
                     "signal_score": event_detail.highest_scoring_market.signal.score,
@@ -78,6 +80,7 @@ class AIInsightServices:
             "Turn structured market data into a calm, clear explanation that helps a beginner understand what the screen means.\n\n"
             "RULES:\n"
             "- Explain what the market is leaning toward right now in plain English.\n"
+            "- Be explicit about which side is moving: YES, NO, or the named outcome itself.\n"
             "- Use the strongest market, probability, delta, signal score, liquidity, and order flow as evidence when available.\n"
             "- Make the wording understandable to a smart beginner, not a quant.\n"
             "- Do not merely restate the top probability; explain what it means.\n"

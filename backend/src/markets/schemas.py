@@ -79,6 +79,8 @@ class SignalRead(BaseModel):
 class HighestScoringMarketRead(BaseModel):
     market_id: str
     market_title: str
+    focus_outcome_side: str | None = None
+    focus_outcome_label: str | None = None
     current_probability: float | None = None
     probability_delta: float = 0.0
     signal: SignalRead

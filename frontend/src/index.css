@@ -52,8 +52,8 @@
   --rgb-navy: 255 255 255;
   --rgb-navy-mid: 248 251 255;
   --rgb-navy-light: 234 241 251;
-  --rgb-border: 194 210 231;
-  --rgb-border-bright: 137 170 214;
+  --rgb-border: 164 186 216;
+  --rgb-border-bright: 109 141 188;
 
   --rgb-text-primary: 14 26 47;
   --rgb-text-secondary: 67 91 126;
@@ -83,8 +83,8 @@
   --g-card: linear-gradient(145deg, rgba(255, 255, 255, 0.95) 0%, rgba(244, 249, 255, 0.96) 100%);
   --g-nav: linear-gradient(180deg, rgba(255, 255, 255, 0.94) 0%, rgba(247, 251, 255, 0.88) 100%);
 
-  --shadow-card: 0 18px 44px rgba(70, 101, 145, 0.12), 0 2px 8px rgba(87, 116, 156, 0.08);
-  --shadow-modal: 0 22px 80px rgba(70, 101, 145, 0.16), 0 8px 24px rgba(87, 116, 156, 0.1);
+  --shadow-card: inset 0 0 0 1px rgba(150, 176, 210, 0.32), 0 18px 44px rgba(70, 101, 145, 0.12), 0 2px 8px rgba(87, 116, 156, 0.08);
+  --shadow-modal: inset 0 0 0 1px rgba(150, 176, 210, 0.28), 0 22px 80px rgba(70, 101, 145, 0.16), 0 8px 24px rgba(87, 116, 156, 0.1);
   --shadow-glow-informed: 0 0 24px rgba(5, 150, 105, 0.18);
   --shadow-glow-uncertain: 0 0 24px rgba(217, 119, 6, 0.18);
   --shadow-glow-noise: 0 0 24px rgba(220, 38, 38, 0.16);
@@ -120,18 +120,7 @@ body {
   .signal-badge-high,
   .signal-badge-mid,
   .signal-badge-low,
-  .signal-button-tracked,
-  .signal-text-high,
-  .signal-text-mid,
-  .signal-text-low,
-  .signal-delta-up,
-  .signal-delta-flat,
-  .signal-delta-down,
-  .signal-bar-up,
-  .signal-bar-flat,
-  .signal-bar-down,
-  .signal-icon-up,
-  .signal-icon-down {
+  .signal-button-tracked {
     border-width: 1px;
   }
 
