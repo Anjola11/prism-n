@@ -115,6 +115,7 @@ export function AdminSystemTrackerPage() {
             isTracked={!!tracked[event.id]}
             isTrackPending={!!pendingByEvent[event.id]}
             onTrack={toggleSystemTrack}
+            origin="admin"
           />
         ))}
 

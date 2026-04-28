@@ -106,6 +106,7 @@ export const analysisRoute = createRoute({
   component: EventDetail,
   validateSearch: (search: Record<string, unknown>) => ({
     source: (search.source as string) || '',
+    origin: (search.origin as string) || '',
   }),
 });
 

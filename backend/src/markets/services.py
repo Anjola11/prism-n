@@ -1,6 +1,6 @@
-﻿import asyncio
+import asyncio
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 from uuid import uuid4
 
@@ -24,6 +24,7 @@ from src.markets.models import (
     Currency,
     EventType,
     MarketEngine,
+    MarketSignalSnapshot,
     MarketSource,
     TrackedEventMetric,
     TrackedMarket,
@@ -34,8 +35,11 @@ from src.markets.schemas import (
     DiscoveryEventRead,
     EventDetailRead,
     EventMarketRead,
+    FlowSignal,
     HighestScoringMarketRead,
     NormalizeEventResult,
+    ScoreHistoryPoint,
+    ScoreHistoryRead,
     SignalRead,
     TrackEventResponse,
     TrackedEventRead,
@@ -179,6 +183,9 @@ class MarketServices:
 
     def _event_ai_insight_cache_id(self, *, event_id: str, currency: Currency) -> str:
         return f"event-ai-insight:v3:{event_id}:{currency.value}"
+
+    def _score_history_cache_id(self, *, event_id: str, market_id: str, hours: int) -> str:
+        return f"score-history:{event_id}:{market_id}:{hours}"
 
     def _is_missing_ai_insight(self, ai_insight: str | None) -> bool:
         if not ai_insight or not ai_insight.strip():
@@ -535,6 +542,14 @@ class MarketServices:
         if current_probability is not None and previous_probability is not None:
             probability_delta = current_probability - previous_probability
 
+        buy_notional = getattr(live_market, "buy_notional", None)
+        if buy_notional is None:
+            buy_notional = getattr(market, "buy_notional", None)
+
+        sell_notional = getattr(live_market, "sell_notional", None)
+        if sell_notional is None:
+            sell_notional = getattr(market, "sell_notional", None)
+
         return EventMarketRead(
             market_id=market.market_id,
             market_title=market.market_title,
@@ -548,8 +563,8 @@ class MarketServices:
             current_probability=current_probability,
             inverse_probability=inverse_probability,
             market_total_orders=market_total_orders,
-            buy_notional=getattr(live_market, "buy_notional", None),
-            sell_notional=getattr(live_market, "sell_notional", None),
+            buy_notional=buy_notional,
+            sell_notional=sell_notional,
             probability_delta=probability_delta,
             event_liquidity=getattr(live_market, "event_liquidity", event_liquidity),
             signal=self._build_signal_read(signal_state=live_signal, market_state=live_market),
@@ -635,6 +650,148 @@ class MarketServices:
             current_probability=focus_probability,
             probability_delta=focus_delta,
             signal=highest.signal,
+        )
+
+    async def _attach_discovery_score_deltas(
+        self,
+        *,
+        session: AsyncSession,
+        discovery: list[DiscoveryEventRead],
+    ) -> list[DiscoveryEventRead]:
+        tracked_pairs = [
+            (item.event_id, item.highest_scoring_market.market_id, item.highest_scoring_market.signal.score)
+            for item in discovery
+            if item.highest_scoring_market and item.highest_scoring_market.market_id
+        ]
+        if not tracked_pairs:
+            return discovery
+
+        oldest_scores = await self._get_oldest_snapshot_scores(
+            session=session,
+            market_ids=[market_id for _, market_id, _ in tracked_pairs],
+            hours=48,
+        )
+
+        enriched: list[DiscoveryEventRead] = []
+        for item in discovery:
+            leader = item.highest_scoring_market
+            if not leader:
+                enriched.append(item)
+                continue
+            oldest_score = oldest_scores.get(leader.market_id)
+            if oldest_score is None:
+                enriched.append(item)
+                continue
+            enriched.append(item.model_copy(update={"score_delta_48h": round(leader.signal.score - oldest_score, 2)}))
+        return enriched
+
+    async def _get_oldest_snapshot_scores(
+        self,
+        *,
+        session: AsyncSession,
+        market_ids: list[str],
+        hours: int = 48,
+    ) -> dict[str, float]:
+        if not market_ids:
+            return {}
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        rows = (
+            await session.exec(
+                select(
+                    MarketSignalSnapshot.market_id,
+                    MarketSignalSnapshot.score,
+                    MarketSignalSnapshot.created_at,
+                ).where(
+                    MarketSignalSnapshot.market_id.in_(market_ids),
+                    MarketSignalSnapshot.created_at >= cutoff,
+                ).order_by(
+                    MarketSignalSnapshot.market_id,
+                    MarketSignalSnapshot.created_at.asc(),
+                )
+            )
+        ).all()
+        oldest_scores: dict[str, float] = {}
+        for market_id, score, _ in rows:
+            oldest_scores.setdefault(market_id, score)
+        return oldest_scores
+
+    async def _attach_market_score_deltas(
+        self,
+        *,
+        session: AsyncSession,
+        markets: list[EventMarketRead],
+    ) -> list[EventMarketRead]:
+        oldest_scores = await self._get_oldest_snapshot_scores(
+            session=session,
+            market_ids=[market.market_id for market in markets],
+            hours=48,
+        )
+        return [
+            market.model_copy(
+                update={
+                    "score_delta_48h": round(market.signal.score - oldest_scores[market.market_id], 2)
+                }
+            ) if market.market_id in oldest_scores else market
+            for market in markets
+        ]
+
+    def _format_notional_short(self, currency: Currency, amount: float | None) -> str:
+        value = float(amount or 0.0)
+        if value >= 1_000_000:
+            compact = f"{value / 1_000_000:.1f}M"
+        elif value >= 1_000:
+            compact = f"{value / 1_000:.1f}K"
+        else:
+            compact = f"{value:.0f}"
+        return f"{currency.value} {compact}"
+
+    async def _build_flow_signal(
+        self,
+        *,
+        session: AsyncSession,
+        market: EventMarketRead,
+        currency: Currency,
+    ) -> FlowSignal:
+        buy_notional = float(market.buy_notional or 0.0)
+        sell_notional = float(market.sell_notional or 0.0)
+        total = buy_notional + sell_notional
+        buy_ratio = buy_notional / total if total > 0 else 0.5
+
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=48)
+        avg_buy = await session.exec(
+            select(func.avg(MarketSignalSnapshot.buy_notional)).where(
+                MarketSignalSnapshot.market_id == market.market_id,
+                MarketSignalSnapshot.created_at >= cutoff,
+            )
+        )
+        avg_buy_value = float(avg_buy.one() or 0.0)
+        unusual_flow = avg_buy_value > 0 and buy_notional > (2 * avg_buy_value)
+        divergence = buy_ratio > 0.65 or buy_ratio < 0.35
+
+        if unusual_flow:
+            flow_note = (
+                f"Unusual {currency.value} flow: buy activity is significantly above the 48h average"
+            )
+        elif buy_ratio > 0.65:
+            flow_note = (
+                f"Smart money leaning Yes - buy flow dominant "
+                f"({self._format_notional_short(currency, buy_notional)} vs {self._format_notional_short(currency, sell_notional)})"
+            )
+        elif buy_ratio < 0.35:
+            flow_note = (
+                f"Selling pressure dominant - money exiting Yes "
+                f"({self._format_notional_short(currency, sell_notional)} vs {self._format_notional_short(currency, buy_notional)})"
+            )
+        else:
+            flow_note = "Balanced flow - no clear directional pressure"
+
+        return FlowSignal(
+            buy_ratio=round(buy_ratio, 4),
+            buy_notional=buy_notional,
+            sell_notional=sell_notional,
+            unusual_flow=unusual_flow,
+            divergence=divergence,
+            flow_note=flow_note,
         )
 
     def _get_event_icon_url(
@@ -849,6 +1006,8 @@ class MarketServices:
                 top_ask_depth=self.polymarket_clob.level_total(yes_asks[0]) if yes_asks else 0.0,
                 top_5_bid_depth=sum(self.polymarket_clob.level_total(level) for level in yes_bids[:5]),
                 top_5_ask_depth=sum(self.polymarket_clob.level_total(level) for level in yes_asks[:5]),
+                buy_notional=sum(self.polymarket_clob.level_total(level) for level in yes_bids),
+                sell_notional=sum(self.polymarket_clob.level_total(level) for level in yes_asks),
                 spread_bps=self.polymarket_clob.spread_bps_from_book(yes_book),
                 orderbook_supported=True,
                 ticker_supported=True,
@@ -1113,6 +1272,40 @@ class MarketServices:
             identifier=self._event_ai_insight_cache_id(event_id=event_id, currency=currency),
             payload={"ai_insight": ai_insight},
             ttl_seconds=self.AI_INSIGHT_CACHE_TTL,
+        )
+
+    async def _enrich_event_detail_analytics(
+        self,
+        *,
+        session: AsyncSession,
+        event_detail: EventDetailRead,
+    ) -> EventDetailRead:
+        enriched_markets = await self._attach_market_score_deltas(
+            session=session,
+            markets=event_detail.markets,
+        )
+        active_market = next(
+            (
+                market
+                for market in enriched_markets
+                if event_detail.highest_scoring_market
+                and market.market_id == event_detail.highest_scoring_market.market_id
+            ),
+            enriched_markets[0] if enriched_markets else None,
+        )
+        flow_signal = None
+        if active_market is not None:
+            flow_signal = await self._build_flow_signal(
+                session=session,
+                market=active_market,
+                currency=event_detail.currency,
+            )
+
+        return event_detail.model_copy(
+            update={
+                "markets": enriched_markets,
+                "flow_signal": flow_signal,
+            }
         )
 
     async def _invalidate_user_read_models(
@@ -2231,6 +2424,7 @@ class MarketServices:
                     cached_detail=authoritative_cached_detail,
                     tracking_enabled=tracking_enabled,
                 )
+                response = await self._enrich_event_detail_analytics(session=session, event_detail=response)
                 return await self._attach_ai_insight(response)
 
         if cached_detail is not None and cached_detail.source == authoritative_source:
@@ -2244,6 +2438,7 @@ class MarketServices:
                 cached_detail=cached_detail,
                 tracking_enabled=tracking_enabled,
             )
+            response = await self._enrich_event_detail_analytics(session=session, event_detail=response)
             return await self._attach_ai_insight(response)
 
         markets = [
@@ -2266,6 +2461,24 @@ class MarketServices:
                     currency=Currency.DOLLAR,
                     source=MarketSource.POLYMARKET,
                 )
+                if self.polymarket_clob:
+                    token_ids = []
+                    for m in normalized.markets:
+                        if m.yes_outcome_id: token_ids.append(m.yes_outcome_id)
+                        if m.no_outcome_id: token_ids.append(m.no_outcome_id)
+                    try:
+                        books = await self.polymarket_clob.get_books(token_ids)
+                        book_map = {str(b.get("asset_id")): b for b in books if b.get("asset_id")}
+                        for m in normalized.markets:
+                            yes_book = book_map.get(m.yes_outcome_id)
+                            no_book = book_map.get(m.no_outcome_id)
+                            yes_bids = (yes_book or {}).get("bids") or []
+                            yes_asks = (yes_book or {}).get("asks") or []
+                            m.buy_notional = sum(self.polymarket_clob.level_total(level) for level in yes_bids)
+                            m.sell_notional = sum(self.polymarket_clob.level_total(level) for level in yes_asks)
+                    except Exception:
+                        logger.warning("Failed to fetch Polymarket order books for event %s", event_id, exc_info=True)
+
                 currency = Currency.DOLLAR
             else:
                 event_payload = await self.bayse.get_event_by_id(event_id=event_id, currency=currency)
@@ -2297,6 +2510,7 @@ class MarketServices:
                 highest_scoring_market=self._build_highest_scoring_market(grouped_markets),
                 markets=grouped_markets,
             )
+            response = await self._enrich_event_detail_analytics(session=session, event_detail=response)
             await self._set_cached_event_detail(event_detail=response)
             return await self._attach_ai_insight(response)
 
@@ -2324,8 +2538,100 @@ class MarketServices:
             last_updated=live_last_updated,
             tracking_enabled=tracking_enabled,
         )
+        response = await self._enrich_event_detail_analytics(session=session, event_detail=response)
         await self._set_cached_event_detail(event_detail=response)
         return await self._attach_ai_insight(response)
+
+    async def get_score_history_for_market(
+        self,
+        *,
+        session: AsyncSession,
+        event_id: str,
+        source: MarketSource,
+        currency: Currency,
+        market_id: str | None = None,
+        hours: int = 48,
+    ) -> ScoreHistoryRead:
+        effective_currency = Currency.DOLLAR if source == MarketSource.POLYMARKET else currency
+
+        resolved_market_id = market_id
+        if resolved_market_id is None:
+            tracked_markets = (
+                await session.exec(
+                    select(TrackedMarket).where(
+                        TrackedMarket.event_id == event_id,
+                        TrackedMarket.source == source,
+                        TrackedMarket.tracking_enabled == True,
+                    )
+                )
+            ).all()
+            if not tracked_markets:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="No tracked markets found for score history",
+                )
+            market_reads = await self._build_market_reads(
+                markets=tracked_markets,
+                currency=effective_currency,
+            )
+            resolved_market_id = self._build_highest_scoring_market(market_reads).market_id
+
+        cache_id = self._score_history_cache_id(
+            event_id=event_id,
+            market_id=resolved_market_id,
+            hours=hours,
+        )
+        cached = await self._safe_get_read_model(
+            namespace="score-history",
+            identifier=cache_id,
+        )
+        if cached and isinstance(cached, dict):
+            try:
+                return ScoreHistoryRead.model_validate(cached)
+            except Exception:
+                logger.warning("Score history cache validation failed for %s", cache_id, exc_info=True)
+
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        rows = (
+            await session.exec(
+                select(
+                    MarketSignalSnapshot.score,
+                    MarketSignalSnapshot.current_probability,
+                    MarketSignalSnapshot.created_at,
+                ).where(
+                    MarketSignalSnapshot.event_id == event_id,
+                    MarketSignalSnapshot.market_id == resolved_market_id,
+                    MarketSignalSnapshot.created_at >= cutoff,
+                ).order_by(MarketSignalSnapshot.created_at.asc())
+            )
+        ).all()
+
+        if len(rows) > 20:
+            step = max(1, len(rows) // 20)
+            sampled_rows = rows[::step]
+            if sampled_rows[-1] != rows[-1]:
+                sampled_rows.append(rows[-1])
+            rows = sampled_rows[:20] if len(sampled_rows) > 20 else sampled_rows
+
+        response = ScoreHistoryRead(
+            event_id=event_id,
+            market_id=resolved_market_id,
+            points=[
+                ScoreHistoryPoint(
+                    score=score,
+                    current_probability=current_probability,
+                    created_at=created_at,
+                )
+                for score, current_probability, created_at in rows
+            ],
+        )
+        await self._safe_set_read_model(
+            namespace="score-history",
+            identifier=cache_id,
+            payload=response.model_dump(mode="json"),
+            ttl_seconds=300,
+        )
+        return response
 
     async def get_discovery_feed_for_user(
         self,
@@ -2334,6 +2640,8 @@ class MarketServices:
         user_id: UUID,
         source: MarketSource | None = None,
         currency: Currency = Currency.DOLLAR,
+        category: str | None = None,
+        sort_by: str | None = None,
         page: int = 1,
         limit: int | None = None,
     ) -> tuple[list[DiscoveryEventRead], int]:
@@ -2384,14 +2692,21 @@ class MarketServices:
             for item in cached
             if not source or item.get("source") == source.value
         ]
-        total_count = len(filtered_cached)
+        if category:
+            normalized_category = category.strip().upper()
+            if normalized_category == "NIGERIA":
+                filtered_cached = [
+                    item for item in filtered_cached
+                    if str(item.get("source") or "").upper() == MarketSource.BAYSE.value
+                    and "NIG" in str(item.get("currency") or "").upper()
+                ]
+            else:
+                filtered_cached = [
+                    item for item in filtered_cached
+                    if str(item.get("category") or "").upper() == normalized_category
+                ]
 
-        if limit is not None:
-            start = max(page - 1, 0) * limit
-            end = start + limit
-            paged_cached = filtered_cached[start:end]
-        else:
-            paged_cached = filtered_cached
+        paged_cached = filtered_cached
 
         # One fast DB query for user's tracked event IDs
         tracked_ids = await self._get_user_tracked_event_ids(session, user_id)
@@ -2458,6 +2773,14 @@ class MarketServices:
                 logger.warning("Discovery worker card validation failed for %s", item.get("event_id"))
                 continue
 
+        discovery = await self._attach_discovery_score_deltas(session=session, discovery=discovery)
+        if sort_by == "conviction_rise":
+            discovery.sort(key=lambda item: item.score_delta_48h if item.score_delta_48h is not None else float("-inf"), reverse=True)
+        total_count = len(discovery)
+        if limit is not None:
+            start = max(page - 1, 0) * limit
+            end = start + limit
+            discovery = discovery[start:end]
         logger.info("Discovery feed contains %s events for user %s", total_count, user_id)
         return discovery, total_count
 
@@ -2467,6 +2790,8 @@ class MarketServices:
         session: AsyncSession,
         source: MarketSource | None = None,
         currency: Currency = Currency.DOLLAR,
+        category: str | None = None,
+        sort_by: str | None = None,
         page: int = 1,
         limit: int | None = None,
     ) -> tuple[list[DiscoveryEventRead], int]:
@@ -2526,14 +2851,21 @@ class MarketServices:
             for item in cached
             if not source or item.get("source") == source.value
         ]
-        total_count = len(filtered_cached)
+        if category:
+            normalized_category = category.strip().upper()
+            if normalized_category == "NIGERIA":
+                filtered_cached = [
+                    item for item in filtered_cached
+                    if str(item.get("source") or "").upper() == MarketSource.BAYSE.value
+                    and "NIG" in str(item.get("currency") or "").upper()
+                ]
+            else:
+                filtered_cached = [
+                    item for item in filtered_cached
+                    if str(item.get("category") or "").upper() == normalized_category
+                ]
 
-        if limit is not None:
-            start = max(page - 1, 0) * limit
-            end = start + limit
-            paged_cached = filtered_cached[start:end]
-        else:
-            paged_cached = filtered_cached
+        paged_cached = filtered_cached
 
         # Overlay system tracking status and build response
         discovery: list[DiscoveryEventRead] = []
@@ -2545,6 +2877,13 @@ class MarketServices:
                 logger.warning("System discovery card validation failed for %s", item.get("event_id"))
                 continue
 
+        discovery = await self._attach_discovery_score_deltas(session=session, discovery=discovery)
+        if sort_by == "conviction_rise":
+            discovery.sort(key=lambda item: item.score_delta_48h if item.score_delta_48h is not None else float("-inf"), reverse=True)
+        total_count = len(discovery)
+        if limit is not None:
+            start = max(page - 1, 0) * limit
+            end = start + limit
+            discovery = discovery[start:end]
         logger.info("System discovery feed contains %s events", total_count)
         return discovery, total_count
-

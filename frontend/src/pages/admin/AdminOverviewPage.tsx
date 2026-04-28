@@ -247,7 +247,7 @@ export function AdminOverviewPage() {
             <div key={`admin-preview-skeleton-${index}`} className="h-[360px] animate-pulse rounded-xl border border-border bg-card" />
           ))}
           {systemTrackedEvents.map((event: DiscoveryCardViewModel) => (
-            <SignalCard key={event.id} event={event} isTracked />
+            <SignalCard key={event.id} event={event} isTracked origin="admin" />
           ))}
           {!overviewQuery.isLoading && systemTrackedEvents.length === 0 && (
             <p className="text-sm text-text-muted">The system is not tracking any events yet.</p>

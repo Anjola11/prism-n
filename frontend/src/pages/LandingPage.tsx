@@ -1,4 +1,4 @@
-﻿import React, { useLayoutEffect, useRef } from 'react';
+import React, { useLayoutEffect, useRef } from 'react';
 import { useNavigate } from '@tanstack/react-router';
 import { PrismLogo } from '../components/brand/PrismLogo';
 import { Button } from '../components/ui/Button';
@@ -136,38 +136,36 @@ export function LandingPage() {
             without the noise.
           </h2>
           <p className="mt-6 max-w-3xl font-body text-lg leading-relaxed text-text-secondary">
-            Whether you are evaluating a binary YES/NO event or a larger multi-outcome market, Prism keeps the workflow simple:
-            discover the strongest move, track it into live focus, and read the event through one unified analysis page.
+            Prism now works in three layers: it scores the market, gives you a verdict before the raw data, and then surfaces the smart-money flow that explains the move.
           </p>
         </section>
 
         <section className="explain-animate">
           <h3 className="mb-10 flex items-center gap-3 font-heading text-2xl font-bold md:text-3xl">
-            <Activity className="text-prism-cyan" /> 1. Discovery surfaces the strongest event
+            <Activity className="text-prism-cyan" /> 1. Signal, not noise
           </h3>
 
           <div className="grid grid-cols-1 items-center gap-12 lg:grid-cols-2">
             <div className="flex flex-col gap-6 font-body leading-relaxed text-text-secondary">
               <p>
-                Discovery is your smart scanner. Prism normalizes events from Bayse and Polymarket into Signal Cards,
-                then lets the strongest event rise with score, direction, and context already attached.
+                Prism reads order-book depth, buy and sell flow, price movement, and persistence across African prediction markets. Every market ends up with one thing you can scan fast: a Conviction Score from 0 to 100.
               </p>
               <ul className="mt-2 space-y-6">
                 <li className="flex gap-4">
                   <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border border-border bg-navy font-mono text-xs text-text-primary">1</div>
                   <div>
-                    <strong className="mb-1 block font-heading text-text-primary">Universal context</strong>
+                    <strong className="mb-1 block font-heading text-text-primary">One score, multiple signals</strong>
                     <span className="text-sm">
-                      The title gives you the umbrella event. The subtitle shows which outcome is actually carrying the move right now.
+                      The score is not just momentum. It is Prism's view of whether the move is liquid, persistent, active, and structured enough to matter.
                     </span>
                   </div>
                 </li>
                 <li className="flex gap-4">
                   <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border border-border bg-navy font-mono text-xs text-text-primary">2</div>
                   <div>
-                    <strong className="mb-1 block font-heading text-text-primary">Instant explanation</strong>
+                    <strong className="mb-1 block font-heading text-text-primary">Direction stays visible</strong>
                     <span className="text-sm">
-                      A short AI sentence explains why the event is showing up, so the feed already feels interpretable at first glance.
+                      You do not just see the number. You see whether conviction is building, fading, or staying flat before you open the event.
                     </span>
                   </div>
                 </li>
@@ -241,40 +239,44 @@ export function LandingPage() {
 
         <section className="explain-animate border-t border-border/50 pt-12">
           <h3 className="mb-10 flex items-center gap-3 font-heading text-2xl font-bold md:text-3xl">
-            <Bookmark className="text-prism-cyan" /> 2. Tracking promotes it into live focus
+            <Bookmark className="text-prism-cyan" /> 2. A verdict before the data
           </h3>
           <div className="flex flex-col items-center gap-12 md:flex-row">
             <div className="flex-1 font-body leading-relaxed text-text-secondary">
               <p className="mb-4">
-                When you press <strong>TRACK</strong>, the event moves from passive browsing into your active monitored set.
+                Before you start reading raw numbers, Prism tells you the trading stance in plain English: LEAN YES, WATCH, CAUTION, or AVOID.
               </p>
               <p>
-                That is where Prism becomes more than a feed. Tracked events are prepared for deeper synchronization so the analysis page can move from a lightweight snapshot toward a more trustworthy live read.
+                The analysis page then explains why the verdict exists, so the page feels like a terminal summary first and a data sheet second.
               </p>
             </div>
             <div className="relative flex flex-1 flex-col items-center justify-center rounded-2xl border border-border bg-navy-mid p-8 shadow-card">
-              <Bookmark className="mb-6 animate-pulse-slow text-noise" size={48} />
-              <p className="font-mono text-xs uppercase tracking-widest text-text-muted">Live synchronization active</p>
+              <div className="w-full max-w-md overflow-hidden rounded-r-xl border border-border bg-card">
+                <div className="signal-trend-up flex items-center justify-between gap-4 border-l-[3px] px-4 py-3">
+                  <span className="truncate font-mono text-sm font-bold uppercase tracking-[0.24em]">Lean Yes</span>
+                  <span className="truncate font-body text-sm text-text-secondary">High conviction, rising momentum</span>
+                </div>
+              </div>
             </div>
           </div>
         </section>
 
         <section className="explain-animate border-t border-border/50 pt-12">
           <h3 className="mb-10 flex items-center gap-3 font-heading text-2xl font-bold md:text-3xl">
-            <Layers className="text-prism-cyan" /> 3. Analysis stays in one frame
+            <Layers className="text-prism-cyan" /> 3. Smart money signals
           </h3>
           <p className="mb-10 max-w-3xl font-body leading-relaxed text-text-secondary">
-            Clicking into an event opens one unified analysis page. Instead of juggling different workflows for simple and complex markets, Prism keeps the event readable through one consistent structure.
+            When one side starts controlling the tape, Prism surfaces it. You see whether buy flow is dominant, whether money is exiting, and whether the move is unusual relative to its own recent baseline.
           </p>
 
           <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
             <div className="flex flex-col rounded-xl border border-border bg-gradient-to-br from-navy-mid to-navy p-6 shadow-card lg:col-span-3">
               <div className="mb-4 flex items-center gap-2">
                 <BrainCircuit className="text-prism-cyan" size={24} />
-                <h3 className="font-heading font-semibold text-text-primary">AI Event Baseline</h3>
+                <h3 className="font-heading font-semibold text-text-primary">Smart Flow Signal</h3>
               </div>
               <p className="font-body text-sm leading-relaxed text-text-secondary">
-                Before you dive into numbers, Prism gives you an AI baseline for the event. It frames the market in plain language so you understand the shape of the move before scanning the microstructure.
+                Prism highlights when buy-side or sell-side pressure becomes meaningful, so you can see what serious traders are doing instead of staring at a static probability.
               </p>
             </div>
 
@@ -317,5 +319,4 @@ export function LandingPage() {
     </div>
   );
 }
-
 

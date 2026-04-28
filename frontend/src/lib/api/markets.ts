@@ -1,6 +1,6 @@
 import { api } from './client';
 import { DEFAULT_CURRENCY } from '../constants';
-import type { ApiResponse, DiscoveryEventApi, EventDetailApi, PaginatedResponse } from './types';
+import type { ApiResponse, DiscoveryEventApi, EventDetailApi, PaginatedResponse, ScoreHistoryApi } from './types';
 
 const unwrap = <T>(response: { data: ApiResponse<T> }): T => response.data.data;
 
@@ -42,19 +42,34 @@ export const marketsApi = {
     limit = 20,
     currency = DEFAULT_CURRENCY,
     source?: string,
+    category?: string,
+    sortBy?: string,
   ): Promise<PaginatedResponse<DiscoveryEventApi>> => {
     const response = await api.get('/events', {
-      params: { currency, source, page, limit },
+      params: { currency, source, category, sort_by: sortBy, page, limit },
       timeout: 45000,
     });
     return normalizePaginated(unwrap(response), page, limit);
   },
-  getEvents: async (currency = DEFAULT_CURRENCY, source?: string): Promise<DiscoveryEventApi[]> => {
-    const paged = await marketsApi.getEventsPage(1, 100, currency, source);
+  getEvents: async (currency = DEFAULT_CURRENCY, source?: string, category?: string, sortBy?: string): Promise<DiscoveryEventApi[]> => {
+    const paged = await marketsApi.getEventsPage(1, 100, currency, source, category, sortBy);
     return paged.items;
   },
   getEvent: async (eventId: string, currency = DEFAULT_CURRENCY, source?: string): Promise<EventDetailApi> => {
     const response = await api.get(`/events/${eventId}`, { params: { currency, source } });
+    return unwrap(response);
+  },
+  getScoreHistory: async (
+    eventId: string,
+    marketId?: string,
+    hours = 48,
+    currency = DEFAULT_CURRENCY,
+    source?: string,
+  ): Promise<ScoreHistoryApi> => {
+    const response = await api.get(`/events/${eventId}/score-history`, {
+      params: { market_id: marketId, hours, currency, source },
+      timeout: 45000,
+    });
     return unwrap(response);
   },
   trackEvent: async (eventId: string, currency = DEFAULT_CURRENCY, source?: string): Promise<any> => {

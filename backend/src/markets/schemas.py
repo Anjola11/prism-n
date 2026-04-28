@@ -30,6 +30,8 @@ class TrackedMarketBase(BaseModel):
     event_total_orders: int | None = None
     closing_date: datetime | None = None
     tracking_enabled: bool = True
+    buy_notional: float | None = None
+    sell_notional: float | None = None
 
 
 class TrackedMarketCreate(TrackedMarketBase):
@@ -124,9 +126,19 @@ class EventMarketRead(BaseModel):
     buy_notional: float | None = None
     sell_notional: float | None = None
     probability_delta: float = 0.0
+    score_delta_48h: float | None = None
     event_liquidity: float | None = None
     signal: SignalRead = Field(default_factory=SignalRead)
     last_updated: str | None = None
+
+
+class FlowSignal(BaseModel):
+    buy_ratio: float = 0.5
+    buy_notional: float = 0.0
+    sell_notional: float = 0.0
+    unusual_flow: bool = False
+    divergence: bool = False
+    flow_note: str | None = None
 
 
 class EventDetailRead(BaseModel):
@@ -148,6 +160,7 @@ class EventDetailRead(BaseModel):
     data_mode: str = "lite_snapshot"
     last_updated: str | None = None
     ai_insight: str = "Insight unavailable"
+    flow_signal: FlowSignal | None = None
     highest_scoring_market: HighestScoringMarketRead | None = None
     markets: list[EventMarketRead]
 
@@ -171,7 +184,20 @@ class DiscoveryEventRead(BaseModel):
     data_mode: str = "lite_snapshot"
     last_updated: str | None = None
     ai_insight: str = "Insight unavailable"
+    score_delta_48h: float | None = None
     highest_scoring_market: HighestScoringMarketRead | None = None
+
+
+class ScoreHistoryPoint(BaseModel):
+    score: float
+    current_probability: float | None = None
+    created_at: datetime
+
+
+class ScoreHistoryRead(BaseModel):
+    event_id: str
+    market_id: str
+    points: list[ScoreHistoryPoint]
 
 
 class SuccessResponse(BaseModel):

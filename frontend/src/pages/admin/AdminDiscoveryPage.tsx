@@ -11,14 +11,23 @@ import { useInfiniteScrollSentinel } from '../../hooks/useInfiniteScrollSentinel
 
 export function AdminDiscoveryPage() {
   const [filter, setFilter] = useState<'ALL' | 'BAYSE' | 'POLYMARKET'>('ALL');
+  const [categoryFilter, setCategoryFilter] = useState<'ALL' | 'POLITICS' | 'SPORTS' | 'ECONOMICS' | 'CRYPTO' | 'NIGERIA'>('ALL');
+  const [sortBy, setSortBy] = useState<'latest' | 'conviction_rise'>('latest');
   const [tracked, setTracked] = useState<Record<string, boolean>>({});
   const [pendingByEvent, setPendingByEvent] = useState<Record<string, boolean>>({});
   const queryClient = useQueryClient();
 
   const discoveryQuery = useInfiniteQuery({
-    queryKey: ['admin-discovery', filter, DEFAULT_PAGE_SIZE],
+    queryKey: ['admin-discovery', filter, categoryFilter, sortBy, DEFAULT_PAGE_SIZE],
     queryFn: ({ pageParam }) => {
-      return adminApi.getDiscoveryPage(pageParam, DEFAULT_PAGE_SIZE, undefined, filter === 'ALL' ? undefined : filter.toLowerCase());
+      return adminApi.getDiscoveryPage(
+        pageParam,
+        DEFAULT_PAGE_SIZE,
+        undefined,
+        filter === 'ALL' ? undefined : filter.toLowerCase(),
+        categoryFilter === 'ALL' ? undefined : categoryFilter.toLowerCase(),
+        sortBy,
+      );
     },
     initialPageParam: 1,
     getNextPageParam: (lastPage) => {
@@ -107,19 +116,46 @@ export function AdminDiscoveryPage() {
         </p>
       </div>
 
-      <div className="flex items-center gap-2">
-        <span className="mr-2 flex items-center gap-1.5 font-mono text-xs text-text-muted">
-          <Filter size={14} /> FILTERS:
-        </span>
-        {(['ALL', 'BAYSE', 'POLYMARKET'] as const).map((option) => (
-          <button
-            key={option}
-            onClick={() => setFilter(option)}
-            className={`rounded-md px-3 py-1.5 font-mono text-xs transition-colors ${filter === option ? 'border border-prism-blue/30 bg-prism-blue/20 text-prism-blue' : 'border border-border bg-navy text-text-secondary hover:text-text-primary'}`}
-          >
-            {option === 'POLYMARKET' ? 'POLY' : option}
-          </button>
-        ))}
+      <div className="flex flex-col gap-3">
+        <div className="flex items-center gap-2">
+          <span className="mr-2 flex items-center gap-1.5 font-mono text-xs text-text-muted">
+            Sort:
+          </span>
+          {(['latest', 'conviction_rise'] as const).map((option) => (
+            <button
+              key={option}
+              onClick={() => setSortBy(option)}
+              className={`rounded-md px-3 py-1.5 font-mono text-xs transition-colors ${sortBy === option ? 'border border-prism-blue/30 bg-prism-blue/20 text-prism-blue' : 'border border-border bg-navy text-text-secondary hover:text-text-primary'}`}
+            >
+              {option === 'latest' ? 'LATEST' : 'CONVICTION RISE'}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="mr-2 flex items-center gap-1.5 font-mono text-xs text-text-muted">
+            <Filter size={14} /> FILTERS:
+          </span>
+          {(['ALL', 'BAYSE', 'POLYMARKET'] as const).map((option) => (
+            <button
+              key={option}
+              onClick={() => setFilter(option)}
+              className={`rounded-md px-3 py-1.5 font-mono text-xs transition-colors ${filter === option ? 'border border-prism-blue/30 bg-prism-blue/20 text-prism-blue' : 'border border-border bg-navy text-text-secondary hover:text-text-primary'}`}
+            >
+              {option === 'POLYMARKET' ? 'POLY' : option}
+            </button>
+          ))}
+        </div>
+        <div className="hide-scrollbar flex max-w-full items-center gap-2 overflow-x-auto whitespace-nowrap">
+          {(['ALL', 'POLITICS', 'SPORTS', 'ECONOMICS', 'CRYPTO', 'NIGERIA'] as const).map((option) => (
+            <button
+              key={option}
+              onClick={() => setCategoryFilter(option)}
+              className={`rounded-md px-3 py-1.5 font-mono text-xs transition-colors ${categoryFilter === option ? 'border border-prism-blue/30 bg-prism-blue/20 text-prism-blue' : 'border border-border bg-navy text-text-secondary hover:text-text-primary'}`}
+            >
+              {option}
+            </button>
+          ))}
+        </div>
       </div>
 
       {discoveryQuery.isLoading && !discoveryQuery.data && (
@@ -145,6 +181,7 @@ export function AdminDiscoveryPage() {
             isTracked={!!tracked[event.id]}
             isTrackPending={!!pendingByEvent[event.id]}
             onTrack={toggleSystemTrack}
+            origin="admin"
           />
         ))}
       </div>

@@ -468,13 +468,6 @@ class PolymarketWebSocketManager:
             ticker_supported=True,
             **updates,
         )
-        await self.live_state.increment_trade_flow(
-            source=MarketSource.POLYMARKET,
-            market_id=binding.market_id,
-            currency=binding.currency,
-            side=side,
-            notional=size * price,
-        )
         await self._score_market(market_id=binding.market_id, currency=binding.currency)
 
     async def _handle_best_bid_ask(self, message: dict[str, Any]) -> None:
@@ -546,6 +539,8 @@ class PolymarketWebSocketManager:
             asks = book.get("asks") or []
             updates.update(
                 {
+                    "buy_notional": sum(self.clob.level_total(level) for level in bids),
+                    "sell_notional": sum(self.clob.level_total(level) for level in asks),
                     "top_bid_depth": self.clob.level_total(bids[0]) if bids else 0.0,
                     "top_ask_depth": self.clob.level_total(asks[0]) if asks else 0.0,
                     "top_5_bid_depth": sum(self.clob.level_total(level) for level in bids[:5]),
@@ -717,6 +712,8 @@ class PolymarketWebSocketManager:
                     top_ask_depth=self.clob.level_total(yes_asks[0]) if yes_asks else 0.0,
                     top_5_bid_depth=sum(self.clob.level_total(level) for level in yes_bids[:5]),
                     top_5_ask_depth=sum(self.clob.level_total(level) for level in yes_asks[:5]),
+                    buy_notional=sum(self.clob.level_total(level) for level in yes_bids),
+                    sell_notional=sum(self.clob.level_total(level) for level in yes_asks),
                     spread_bps=self.clob.spread_bps_from_book(yes_book),
                     orderbook_supported=True,
                     ticker_supported=True,

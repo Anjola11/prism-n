@@ -133,6 +133,8 @@ async def admin_overview(
 async def admin_discovery(
     source: MarketSource | None = None,
     currency: Currency = Currency.DOLLAR,
+    category: str | None = None,
+    sort_by: str | None = None,
     page: int = Query(default=1, ge=1),
     limit: int = Query(default=20, ge=1, le=100),
     session: AsyncSession = Depends(get_session),
@@ -144,6 +146,8 @@ async def admin_discovery(
         session=session,
         source=source,
         currency=currency,
+        category=category,
+        sort_by=sort_by,
         page=page,
         limit=limit,
     )
@@ -155,6 +159,42 @@ async def admin_discovery(
             limit=limit,
             total=total_count,
         ),
+    )
+
+
+@admin_router.get(
+    "/events/{event_id}/score-history",
+    response_model=SuccessResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def admin_event_score_history(
+    event_id: str,
+    source: MarketSource = MarketSource.BAYSE,
+    currency: Currency = Currency.DOLLAR,
+    market_id: str | None = None,
+    hours: int = Query(default=48, ge=1, le=168),
+    session: AsyncSession = Depends(get_session),
+    market_services: MarketServices = Depends(get_market_services),
+    admin_user_id=Depends(get_admin_user_id),
+):
+    logger.info(
+        "Admin score history requested by %s for event %s market %s window=%sh",
+        admin_user_id,
+        event_id,
+        market_id or "top",
+        hours,
+    )
+    result = await market_services.get_score_history_for_market(
+        session=session,
+        event_id=event_id,
+        source=source,
+        currency=currency,
+        market_id=market_id,
+        hours=hours,
+    )
+    return success_response(
+        message="Admin score history fetched successfully",
+        data=result.model_dump(mode="json"),
     )
 
 

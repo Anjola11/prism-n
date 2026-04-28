@@ -87,6 +87,8 @@ async def track_event(
 async def get_discovery_events(
     source: MarketSource | None = None,
     currency: Currency = Currency.DOLLAR,
+    category: str | None = None,
+    sort_by: str | None = None,
     page: int = Query(default=1, ge=1),
     limit: int = Query(default=20, ge=1, le=100),
     session: AsyncSession = Depends(get_session),
@@ -99,6 +101,8 @@ async def get_discovery_events(
         user_id=user_id,
         source=source,
         currency=currency,
+        category=category,
+        sort_by=sort_by,
         page=page,
         limit=limit,
     )
@@ -137,6 +141,42 @@ async def get_event_detail(
     return success_response(
         message="Event detail fetched successfully",
         data=result.model_dump(),
+    )
+
+
+@markets_router.get(
+    "/events/{event_id}/score-history",
+    response_model=SuccessResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def get_event_score_history(
+    event_id: str,
+    source: MarketSource = MarketSource.BAYSE,
+    currency: Currency = Currency.DOLLAR,
+    market_id: str | None = None,
+    hours: int = Query(default=48, ge=1, le=168),
+    session: AsyncSession = Depends(get_session),
+    market_services: MarketServices = Depends(get_market_services),
+    user_id: UUID = Depends(get_verified_user_id),
+):
+    logger.info(
+        "Score history route called for user %s and event %s market %s window=%sh",
+        user_id,
+        event_id,
+        market_id or "top",
+        hours,
+    )
+    result = await market_services.get_score_history_for_market(
+        session=session,
+        event_id=event_id,
+        source=source,
+        currency=currency,
+        market_id=market_id,
+        hours=hours,
+    )
+    return success_response(
+        message="Score history fetched successfully",
+        data=result.model_dump(mode="json"),
     )
 
 

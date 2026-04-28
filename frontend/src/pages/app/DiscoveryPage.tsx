@@ -15,12 +15,15 @@ export function DiscoveryPage() {
   const hasAnimatedForFilterRef = useRef(false);
   const previousEventIdsRef = useRef<string[]>([]);
   const [filter, setFilter] = useState<'ALL' | 'BAYSE' | 'POLYMARKET'>('ALL');
+  const [categoryFilter, setCategoryFilter] = useState<'ALL' | 'POLITICS' | 'SPORTS' | 'ECONOMICS' | 'CRYPTO' | 'NIGERIA'>('ALL');
+  const [sortBy, setSortBy] = useState<'latest' | 'conviction_rise'>('latest');
   const [tracked, setTracked] = useState<Record<string, boolean>>({});
   const discoveryQuery = useInfiniteQuery({
-    queryKey: ['discovery-feed', filter, DEFAULT_PAGE_SIZE],
+    queryKey: ['discovery-feed', filter, categoryFilter, sortBy, DEFAULT_PAGE_SIZE],
     queryFn: async ({ pageParam }) => {
       const source = filter === 'ALL' ? undefined : filter.toLowerCase();
-      return marketsApi.getEventsPage(pageParam, DEFAULT_PAGE_SIZE, undefined, source);
+      const category = categoryFilter === 'ALL' ? undefined : categoryFilter.toLowerCase();
+      return marketsApi.getEventsPage(pageParam, DEFAULT_PAGE_SIZE, undefined, source, category, sortBy);
     },
     initialPageParam: 1,
     getNextPageParam: (lastPage) => {
@@ -54,7 +57,7 @@ export function DiscoveryPage() {
   React.useEffect(() => {
     hasAnimatedForFilterRef.current = false;
     previousEventIdsRef.current = [];
-  }, [filter]);
+  }, [categoryFilter, filter, sortBy]);
 
   useLayoutEffect(() => {
     if (events.length === 0) return;
@@ -161,28 +164,60 @@ export function DiscoveryPage() {
           </p>
         </div>
 
-        <div className="mt-4 flex items-center gap-2 sm:mt-0">
-          <span className="mr-2 flex items-center gap-1.5 font-mono text-xs text-text-muted">
+        <div className="mt-4 flex flex-col gap-3 sm:mt-0 sm:items-end">
+          <div className="flex items-center gap-2">
+            <span className="mr-2 flex items-center gap-1.5 font-mono text-xs text-text-muted">
+              Sort:
+            </span>
+            <button
+              onClick={() => setSortBy('latest')}
+              className={`rounded-md px-3 py-1.5 font-mono text-[10px] transition-colors sm:text-xs ${sortBy === 'latest' ? 'border border-prism-blue/30 bg-prism-blue/20 text-prism-blue' : 'border border-border bg-navy text-text-secondary hover:text-text-primary'}`}
+            >
+              LATEST
+            </button>
+            <button
+              onClick={() => setSortBy('conviction_rise')}
+              className={`rounded-md px-3 py-1.5 font-mono text-[10px] transition-colors sm:text-xs ${sortBy === 'conviction_rise' ? 'border border-prism-blue/30 bg-prism-blue/20 text-prism-blue' : 'border border-border bg-navy text-text-secondary hover:text-text-primary'}`}
+            >
+              CONVICTION RISE
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <span className="mr-2 flex items-center gap-1.5 font-mono text-xs text-text-muted">
             <Filter size={14} /> FILTERS:
-          </span>
-          <button
-            onClick={() => setFilter('ALL')}
-            className={`rounded-md px-3 py-1.5 font-mono text-[10px] transition-colors sm:text-xs ${filter === 'ALL' ? 'border border-prism-blue/30 bg-prism-blue/20 text-prism-blue' : 'border border-border bg-navy text-text-secondary hover:text-text-primary'}`}
-          >
-            ALL
-          </button>
-          <button
-            onClick={() => setFilter('BAYSE')}
-            className={`rounded-md px-3 py-1.5 font-mono text-[10px] transition-colors sm:text-xs ${filter === 'BAYSE' ? 'border border-prism-blue/30 bg-prism-blue/20 text-prism-blue' : 'border border-border bg-navy text-text-secondary hover:text-text-primary'}`}
-          >
-            BAYSE
-          </button>
-          <button
-            onClick={() => setFilter('POLYMARKET')}
-            className={`rounded-md px-3 py-1.5 font-mono text-[10px] transition-colors sm:text-xs ${filter === 'POLYMARKET' ? 'border border-prism-blue/30 bg-prism-blue/20 text-prism-blue' : 'border border-border bg-navy text-text-secondary hover:text-text-primary'}`}
-          >
-            POLY
-          </button>
+            </span>
+            <button
+              onClick={() => setFilter('ALL')}
+              className={`rounded-md px-3 py-1.5 font-mono text-[10px] transition-colors sm:text-xs ${filter === 'ALL' ? 'border border-prism-blue/30 bg-prism-blue/20 text-prism-blue' : 'border border-border bg-navy text-text-secondary hover:text-text-primary'}`}
+            >
+              ALL
+            </button>
+            <button
+              onClick={() => setFilter('BAYSE')}
+              className={`rounded-md px-3 py-1.5 font-mono text-[10px] transition-colors sm:text-xs ${filter === 'BAYSE' ? 'border border-prism-blue/30 bg-prism-blue/20 text-prism-blue' : 'border border-border bg-navy text-text-secondary hover:text-text-primary'}`}
+            >
+              BAYSE
+            </button>
+            <button
+              onClick={() => setFilter('POLYMARKET')}
+              className={`rounded-md px-3 py-1.5 font-mono text-[10px] transition-colors sm:text-xs ${filter === 'POLYMARKET' ? 'border border-prism-blue/30 bg-prism-blue/20 text-prism-blue' : 'border border-border bg-navy text-text-secondary hover:text-text-primary'}`}
+            >
+              POLY
+            </button>
+          </div>
+
+          <div className="hide-scrollbar flex max-w-full items-center gap-2 overflow-x-auto whitespace-nowrap">
+            {(['ALL', 'POLITICS', 'SPORTS', 'ECONOMICS', 'CRYPTO', 'NIGERIA'] as const).map((option) => (
+              <button
+                key={option}
+                onClick={() => setCategoryFilter(option)}
+                className={`rounded-md px-3 py-1.5 font-mono text-[10px] transition-colors sm:text-xs ${categoryFilter === option ? 'border border-prism-blue/30 bg-prism-blue/20 text-prism-blue' : 'border border-border bg-navy text-text-secondary hover:text-text-primary'}`}
+              >
+                {option}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -208,7 +243,7 @@ export function DiscoveryPage() {
 
         {!discoveryQuery.isLoading && filteredEvents.map((event) => (
           <div key={event.id} className="event-card-wrapper h-full" data-event-id={event.id}>
-            <SignalCard event={event} onTrack={toggleTrack} isTracked={!!tracked[event.id]} />
+            <SignalCard event={event} onTrack={toggleTrack} isTracked={!!tracked[event.id]} origin="discovery" />
           </div>
         ))}
 

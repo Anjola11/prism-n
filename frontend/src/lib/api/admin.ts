@@ -9,6 +9,7 @@ import type {
   AuthUserApi,
   DiscoveryEventApi,
   PaginatedResponse,
+  ScoreHistoryApi,
 } from './types';
 
 const unwrap = <T>(response: { data: ApiResponse<T> }): T => response.data.data;
@@ -78,15 +79,17 @@ export const adminApi = {
     limit = 20,
     currency = DEFAULT_CURRENCY,
     source?: string,
+    category?: string,
+    sortBy?: string,
   ): Promise<PaginatedResponse<DiscoveryEventApi>> => {
     const response = await api.get('/admin/discovery', {
-      params: { currency, source, page, limit },
+      params: { currency, source, category, sort_by: sortBy, page, limit },
       timeout: 45000,
     });
     return normalizePaginated(unwrap(response), page, limit);
   },
-  getDiscovery: async (currency = DEFAULT_CURRENCY, source?: string): Promise<DiscoveryEventApi[]> => {
-    const paged = await adminApi.getDiscoveryPage(1, 100, currency, source);
+  getDiscovery: async (currency = DEFAULT_CURRENCY, source?: string, category?: string, sortBy?: string): Promise<DiscoveryEventApi[]> => {
+    const paged = await adminApi.getDiscoveryPage(1, 100, currency, source, category, sortBy);
     return paged.items;
   },
   getSystemTrackerPage: async (
@@ -103,6 +106,19 @@ export const adminApi = {
   getSystemTracker: async (currency = DEFAULT_CURRENCY): Promise<DiscoveryEventApi[]> => {
     const paged = await adminApi.getSystemTrackerPage(1, 100, currency);
     return paged.items;
+  },
+  getScoreHistory: async (
+    eventId: string,
+    marketId?: string,
+    hours = 48,
+    currency = DEFAULT_CURRENCY,
+    source?: string,
+  ): Promise<ScoreHistoryApi> => {
+    const response = await api.get(`/admin/events/${eventId}/score-history`, {
+      params: { market_id: marketId, hours, currency, source },
+      timeout: 45000,
+    });
+    return unwrap(response);
   },
   systemTrack: async (eventId: string, currency = DEFAULT_CURRENCY, source?: string): Promise<any> => {
     const response = await api.post(`/admin/system-track/${eventId}`, null, { params: { currency, source } });

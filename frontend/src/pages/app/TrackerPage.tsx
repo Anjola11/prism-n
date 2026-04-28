@@ -173,7 +173,7 @@ export function TrackerPage() {
 
         {!trackerQuery.isLoading && events.map((event) => (
           <div key={event.id} className="event-card-wrapper h-full" data-event-id={event.id}>
-            <SignalCard event={event} onTrack={toggleTrack} isTracked={!!tracked[event.id]} />
+            <SignalCard event={event} onTrack={toggleTrack} isTracked={!!tracked[event.id]} origin="tracker" />
           </div>
         ))}
 

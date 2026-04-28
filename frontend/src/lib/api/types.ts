@@ -62,6 +62,7 @@ export interface DiscoveryEventApi {
   data_mode: string;
   last_updated: string | null;
   ai_insight: string;
+  score_delta_48h?: number | null;
   highest_scoring_market?: HighestScoringMarketApi | null;
 }
 
@@ -81,14 +82,37 @@ export interface EventMarketApi {
   buy_notional: number | null;
   sell_notional: number | null;
   probability_delta: number;
+  score_delta_48h?: number | null;
   event_liquidity: number | null;
   signal: SignalApi;
   last_updated: string | null;
 }
 
+export interface FlowSignalApi {
+  buy_ratio: number;
+  buy_notional: number;
+  sell_notional: number;
+  unusual_flow: boolean;
+  divergence: boolean;
+  flow_note?: string | null;
+}
+
 export interface EventDetailApi extends DiscoveryEventApi {
   event_total_orders: number | null;
+  flow_signal?: FlowSignalApi | null;
   markets: EventMarketApi[];
+}
+
+export interface ScoreHistoryPointApi {
+  score: number;
+  current_probability: number | null;
+  created_at: string;
+}
+
+export interface ScoreHistoryApi {
+  event_id: string;
+  market_id: string;
+  points: ScoreHistoryPointApi[];
 }
 
 export interface MostTrackedEventApi {
@@ -171,6 +195,7 @@ export interface HighestScoringMarketViewModel {
 export interface DiscoveryCardViewModel {
   id: string;
   title: string;
+  category: string | null;
   iconUrl: string | null;
   source: string;
   currency: string;
@@ -180,5 +205,6 @@ export interface DiscoveryCardViewModel {
   aiInsight: string;
   trackingEnabled: boolean;
   dataMode: string;
+  scoreDelta48h: number | null;
   highestScoringMarket: HighestScoringMarketViewModel | null;
 }
