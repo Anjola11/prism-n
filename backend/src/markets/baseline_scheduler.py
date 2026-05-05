@@ -98,6 +98,17 @@ class BaselineRefreshScheduler:
                     )
                     refreshed += 1
                 except Exception:
+                    # If any statement fails, Postgres marks the whole transaction as aborted.
+                    # We must rollback before issuing further commands on this session.
+                    try:
+                        await session.rollback()
+                    except Exception:
+                        logger.warning(
+                            "Rollback failed after baseline refresh error for event %s source %s",
+                            event_id,
+                            source,
+                            exc_info=True,
+                        )
                     logger.warning("Failed refreshing baselines for event %s source %s", event_id, source, exc_info=True)
             if refreshed:
                 logger.info("Refreshed baselines for %s tracked events", refreshed)

@@ -52,45 +52,58 @@ class BaselineServices:
         outcome: Outcome = Outcome.YES,
         source: MarketSource = MarketSource.BAYSE,
     ) -> list[MarketBaselineSnapshot]:
-        if source == MarketSource.POLYMARKET:
-            return await self._refresh_polymarket_event_baselines(
-                session=session,
+        try:
+            if source == MarketSource.POLYMARKET:
+                return await self._refresh_polymarket_event_baselines(
+                    session=session,
+                    event_id=event_id,
+                    window=window,
+                    outcome=outcome,
+                )
+
+            if self.bayse is None:
+                raise RuntimeError("Bayse baseline service is not configured")
+
+            logger.info(
+                "Refreshing baselines for event %s source %s window %s outcome %s",
+                event_id,
+                source.value,
+                window.value,
+                outcome.value,
+            )
+            history_payload = await self.bayse.get_price_history(
                 event_id=event_id,
                 window=window,
                 outcome=outcome,
             )
 
-        if self.bayse is None:
-            raise RuntimeError("Bayse baseline service is not configured")
+            snapshots: list[MarketBaselineSnapshot] = []
+            for market_payload in history_payload.get("markets", []):
+                snapshot = self.compute_market_baseline(
+                    event_id=event_id,
+                    market_payload=market_payload,
+                    window=window,
+                    outcome=outcome,
+                    source=source,
+                )
+                await self._upsert_market_baseline(session=session, snapshot=snapshot)
+                snapshots.append(snapshot)
 
-        logger.info(
-            "Refreshing baselines for event %s source %s window %s outcome %s",
-            event_id,
-            source.value,
-            window.value,
-            outcome.value,
-        )
-        history_payload = await self.bayse.get_price_history(
-            event_id=event_id,
-            window=window,
-            outcome=outcome,
-        )
-
-        snapshots: list[MarketBaselineSnapshot] = []
-        for market_payload in history_payload.get("markets", []):
-            snapshot = self.compute_market_baseline(
-                event_id=event_id,
-                market_payload=market_payload,
-                window=window,
-                outcome=outcome,
-                source=source,
-            )
-            await self._upsert_market_baseline(session=session, snapshot=snapshot)
-            snapshots.append(snapshot)
-
-        await session.commit()
-        logger.info("Refreshed %s market baselines for event %s", len(snapshots), event_id)
-        return snapshots
+            await session.commit()
+            logger.info("Refreshed %s market baselines for event %s", len(snapshots), event_id)
+            return snapshots
+        except Exception:
+            # Leave the session usable for callers that want to continue using it.
+            try:
+                await session.rollback()
+            except Exception:
+                logger.warning(
+                    "Rollback failed after baseline refresh error for event %s source %s",
+                    event_id,
+                    source,
+                    exc_info=True,
+                )
+            raise
 
     async def _refresh_polymarket_event_baselines(
         self,
@@ -100,53 +113,64 @@ class BaselineServices:
         window: HistoryWindow,
         outcome: Outcome,
     ) -> list[MarketBaselineSnapshot]:
-        if self.polymarket_clob is None:
-            raise RuntimeError("Polymarket CLOB service is not configured")
+        try:
+            if self.polymarket_clob is None:
+                raise RuntimeError("Polymarket CLOB service is not configured")
 
-        logger.info(
-            "Refreshing Polymarket baselines for event %s window %s outcome %s",
-            event_id,
-            window.value,
-            outcome.value,
-        )
-        from src.markets.models import TrackedMarket  # local import to avoid circular import at module load
+            logger.info(
+                "Refreshing Polymarket baselines for event %s window %s outcome %s",
+                event_id,
+                window.value,
+                outcome.value,
+            )
+            from src.markets.models import TrackedMarket  # local import to avoid circular import at module load
 
-        tracked_polymarket_markets = (
-            await session.exec(
-                select(TrackedMarket).where(
-                    TrackedMarket.event_id == event_id,
-                    TrackedMarket.source == MarketSource.POLYMARKET,
-                    TrackedMarket.tracking_enabled == True,
+            tracked_polymarket_markets = (
+                await session.exec(
+                    select(TrackedMarket).where(
+                        TrackedMarket.event_id == event_id,
+                        TrackedMarket.source == MarketSource.POLYMARKET,
+                        TrackedMarket.tracking_enabled == True,
+                    )
                 )
+            ).all()
+            if not tracked_polymarket_markets:
+                return []
+
+            asset_ids = [market.yes_outcome_id for market in tracked_polymarket_markets if market.yes_outcome_id]
+            history_by_asset = await self.polymarket_clob.get_batch_prices_history(
+                asset_ids=asset_ids,
+                interval=self._map_clob_interval(window),
+                fidelity=5,
             )
-        ).all()
-        if not tracked_polymarket_markets:
-            return []
 
-        asset_ids = [market.yes_outcome_id for market in tracked_polymarket_markets if market.yes_outcome_id]
-        history_by_asset = await self.polymarket_clob.get_batch_prices_history(
-            asset_ids=asset_ids,
-            interval=self._map_clob_interval(window),
-            fidelity=5,
-        )
+            snapshots: list[MarketBaselineSnapshot] = []
+            for market in tracked_polymarket_markets:
+                history_payload = history_by_asset.get(market.yes_outcome_id) or {}
+                snapshot = self.compute_polymarket_market_baseline(
+                    event_id=event_id,
+                    market_id=market.market_id,
+                    asset_id=market.yes_outcome_id,
+                    history_payload=history_payload,
+                    window=window,
+                    outcome=outcome,
+                )
+                await self._upsert_market_baseline(session=session, snapshot=snapshot)
+                snapshots.append(snapshot)
 
-        snapshots: list[MarketBaselineSnapshot] = []
-        for market in tracked_polymarket_markets:
-            history_payload = history_by_asset.get(market.yes_outcome_id) or {}
-            snapshot = self.compute_polymarket_market_baseline(
-                event_id=event_id,
-                market_id=market.market_id,
-                asset_id=market.yes_outcome_id,
-                history_payload=history_payload,
-                window=window,
-                outcome=outcome,
-            )
-            await self._upsert_market_baseline(session=session, snapshot=snapshot)
-            snapshots.append(snapshot)
-
-        await session.commit()
-        logger.info("Refreshed %s Polymarket market baselines for event %s", len(snapshots), event_id)
-        return snapshots
+            await session.commit()
+            logger.info("Refreshed %s Polymarket market baselines for event %s", len(snapshots), event_id)
+            return snapshots
+        except Exception:
+            try:
+                await session.rollback()
+            except Exception:
+                logger.warning(
+                    "Rollback failed after Polymarket baseline refresh error for event %s",
+                    event_id,
+                    exc_info=True,
+                )
+            raise
 
     def compute_market_baseline(
         self,

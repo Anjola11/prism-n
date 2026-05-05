@@ -41,7 +41,7 @@ export function ConvictionChart({ points, loading = false }: ConvictionChartProp
     return <div className="h-48 animate-pulse rounded-xl border border-border bg-card" />;
   }
 
-  if (points.length < 3) {
+  if (points.length === 0) {
     return (
       <div className="flex h-48 items-center justify-center rounded-xl border border-border bg-card text-sm text-text-muted">
         Chart building - more data needed
@@ -56,7 +56,7 @@ export function ConvictionChart({ points, loading = false }: ConvictionChartProp
         className="min-w-[320px] w-full"
         role="img"
         aria-label={`Conviction score over 48 hours with probability overlay, ${
-          points[points.length - 1].score >= points[0].score ? 'rising' : 'falling'
+          points.length > 1 && points[points.length - 1].score >= points[0].score ? 'rising' : 'falling'
         } from ${Math.round(points[0].score)} to ${Math.round(points[points.length - 1].score)}`}
         onMouseLeave={() => setHoveredIndex(null)}
       >
@@ -84,17 +84,26 @@ export function ConvictionChart({ points, loading = false }: ConvictionChartProp
           />
         ))}
 
-        <path d={`${scorePath} L ${normalized[normalized.length - 1].x} ${CHART_BOTTOM} L ${normalized[0].x} ${CHART_BOTTOM} Z`} fill="url(#score-fill)" />
-        <path d={`${probabilityPath} L ${normalized[normalized.length - 1].x} ${CHART_BOTTOM} L ${normalized[0].x} ${CHART_BOTTOM} Z`} fill="url(#probability-fill)" />
-        <path d={scorePath} fill="none" stroke="rgb(var(--rgb-prism-cyan))" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-        <path d={probabilityPath} fill="none" stroke="rgb(var(--rgb-prism-violet))" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+        {normalized.length > 1 ? (
+          <>
+            <path d={`${scorePath} L ${normalized[normalized.length - 1].x} ${CHART_BOTTOM} L ${normalized[0].x} ${CHART_BOTTOM} Z`} fill="url(#score-fill)" />
+            <path d={`${probabilityPath} L ${normalized[normalized.length - 1].x} ${CHART_BOTTOM} L ${normalized[0].x} ${CHART_BOTTOM} Z`} fill="url(#probability-fill)" />
+            <path d={scorePath} fill="none" stroke="rgb(var(--rgb-prism-cyan))" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+            <path d={probabilityPath} fill="none" stroke="rgb(var(--rgb-prism-violet))" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+          </>
+        ) : (
+          <>
+            <circle cx={normalized[0].x} cy={normalized[0].scoreY} r="4" fill="rgb(var(--rgb-prism-cyan))" />
+            <circle cx={normalized[0].x} cy={normalized[0].probabilityY} r="4" fill="rgb(var(--rgb-prism-violet))" />
+          </>
+        )}
 
         {normalized.map((point, index) => (
           <rect
             key={point.label + index}
             x={index === 0 ? 0 : normalized[index - 1].x}
             y={0}
-            width={index === 0 ? point.x + 12 : point.x - normalized[index - 1].x}
+            width={index === 0 ? point.x + 12 : Math.max(24, point.x - normalized[index - 1].x)}
             height={HEIGHT}
             fill="transparent"
             onMouseMove={() => setHoveredIndex(index)}
@@ -121,19 +130,21 @@ export function ConvictionChart({ points, loading = false }: ConvictionChartProp
           </>
         )}
 
-        {normalized.filter((_, index) => index % Math.max(1, Math.floor(normalized.length / 4)) === 0 || index === normalized.length - 1).map((point, index) => (
-          <text
-            key={`${point.label}-${index}`}
-            x={point.x}
-            y={150}
-            textAnchor="middle"
-            fill="rgb(var(--rgb-text-muted))"
-            fontSize="10"
-            fontFamily="JetBrains Mono, monospace"
-          >
-            {point.label}
-          </text>
-        ))}
+        {normalized
+          .filter((_, index) => index % Math.max(1, Math.floor(normalized.length / 4)) === 0 || index === normalized.length - 1)
+          .map((point, index) => (
+            <text
+              key={`${point.label}-${index}`}
+              x={point.x}
+              y={150}
+              textAnchor="middle"
+              fill="rgb(var(--rgb-text-muted))"
+              fontSize="10"
+              fontFamily="JetBrains Mono, monospace"
+            >
+              {point.label}
+            </text>
+          ))}
       </svg>
     </div>
   );

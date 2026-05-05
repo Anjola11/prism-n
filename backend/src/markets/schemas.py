@@ -85,6 +85,8 @@ class HighestScoringMarketRead(BaseModel):
     focus_outcome_label: str | None = None
     current_probability: float | None = None
     probability_delta: float = 0.0
+    buy_notional: float | None = None
+    sell_notional: float | None = None
     signal: SignalRead
 
 

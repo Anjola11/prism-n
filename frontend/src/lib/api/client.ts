@@ -1,6 +1,10 @@
 import axios from 'axios';
 
 function resolveApiBaseUrl(): string {
+  if (import.meta.env.DEV) {
+    return '/api/v1';
+  }
+
   const envBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim();
   if (envBaseUrl) {
     return envBaseUrl;

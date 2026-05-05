@@ -1,5 +1,5 @@
 import React, { useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { useInfiniteQuery } from '@tanstack/react-query';
+import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
 import gsap from 'gsap';
 import { Filter } from 'lucide-react';
 
@@ -14,6 +14,7 @@ export function DiscoveryPage() {
   const container = useRef<HTMLDivElement>(null);
   const hasAnimatedForFilterRef = useRef(false);
   const previousEventIdsRef = useRef<string[]>([]);
+  const queryClient = useQueryClient();
   const [filter, setFilter] = useState<'ALL' | 'BAYSE' | 'POLYMARKET'>('ALL');
   const [categoryFilter, setCategoryFilter] = useState<'ALL' | 'POLITICS' | 'SPORTS' | 'ECONOMICS' | 'CRYPTO' | 'NIGERIA'>('ALL');
   const [sortBy, setSortBy] = useState<'latest' | 'conviction_rise'>('latest');
@@ -123,7 +124,11 @@ export function DiscoveryPage() {
   React.useEffect(() => {
     if (events.length > 0) {
       setTracked((prev) => {
-        const next = Object.fromEntries(events.map((event) => [event.id, event.trackingEnabled]));
+        const next = { ...prev };
+        for (const event of events) {
+          const serverTracked = !!event.trackingEnabled;
+          next[event.id] = serverTracked || !!prev[event.id];
+        }
         const prevKeys = Object.keys(prev);
         const nextKeys = Object.keys(next);
         const isUnchanged =
@@ -147,6 +152,10 @@ export function DiscoveryPage() {
       } else {
         await marketsApi.untrackEvent(id, undefined, source);
       }
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['discovery-feed'] }),
+        queryClient.invalidateQueries({ queryKey: ['tracker-feed'] }),
+      ]);
     } catch {
       setTracked((prev) => ({ ...prev, [id]: !isTracking }));
     }

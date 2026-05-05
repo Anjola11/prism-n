@@ -136,7 +136,7 @@ export function LandingPage() {
             without the noise.
           </h2>
           <p className="mt-6 max-w-3xl font-body text-lg leading-relaxed text-text-secondary">
-            Prism now works in three layers: it scores the market, gives you a verdict before the raw data, and then surfaces the smart-money flow that explains the move.
+            Prism now works in three layers: it scores conviction, overlays live probability, and then surfaces the smart-money flow that explains whether the move deserves trader attention.
           </p>
         </section>
 
@@ -148,7 +148,7 @@ export function LandingPage() {
           <div className="grid grid-cols-1 items-center gap-12 lg:grid-cols-2">
             <div className="flex flex-col gap-6 font-body leading-relaxed text-text-secondary">
               <p>
-                Prism reads order-book depth, buy and sell flow, price movement, and persistence across African prediction markets. Every market ends up with one thing you can scan fast: a Conviction Score from 0 to 100.
+                Prism reads order-book depth, buy and sell flow, price movement, and persistence across prediction markets. Every market ends up with one thing you can scan fast: a Conviction Score from 0 to 100, paired with the live probability the market is pricing.
               </p>
               <ul className="mt-2 space-y-6">
                 <li className="flex gap-4">
@@ -156,7 +156,7 @@ export function LandingPage() {
                   <div>
                     <strong className="mb-1 block font-heading text-text-primary">One score, multiple signals</strong>
                     <span className="text-sm">
-                      The score is not just momentum. It is Prism's view of whether the move is liquid, persistent, active, and structured enough to matter.
+                      The score is not just momentum. It is Prism's view of whether the move is liquid, persistent, active, and structured enough to matter, while probability shows where the market is currently priced.
                     </span>
                   </div>
                 </li>
@@ -165,7 +165,7 @@ export function LandingPage() {
                   <div>
                     <strong className="mb-1 block font-heading text-text-primary">Direction stays visible</strong>
                     <span className="text-sm">
-                      You do not just see the number. You see whether conviction is building, fading, or staying flat before you open the event.
+                      You do not just see the number. You see whether conviction is building, fading, or staying flat, and whether that conviction is confirming or diverging from the market probability.
                     </span>
                   </div>
                 </li>
@@ -244,10 +244,10 @@ export function LandingPage() {
           <div className="flex flex-col items-center gap-12 md:flex-row">
             <div className="flex-1 font-body leading-relaxed text-text-secondary">
               <p className="mb-4">
-                Before you start reading raw numbers, Prism tells you the trading stance in plain English: LEAN YES, WATCH, CAUTION, or AVOID.
+                Before you start reading raw numbers, Prism tells you the trading stance in plain English: LEAN YES, WATCH, CAUTION, or AVOID. Then the chart shows whether conviction and probability are traveling together or starting to separate.
               </p>
               <p>
-                The analysis page then explains why the verdict exists, so the page feels like a terminal summary first and a data sheet second.
+                The analysis page then explains why the verdict exists, so the page feels like a terminal summary first and a trader's dashboard second, not a raw data sheet.
               </p>
             </div>
             <div className="relative flex flex-1 flex-col items-center justify-center rounded-2xl border border-border bg-navy-mid p-8 shadow-card">
@@ -276,7 +276,7 @@ export function LandingPage() {
                 <h3 className="font-heading font-semibold text-text-primary">Smart Flow Signal</h3>
               </div>
               <p className="font-body text-sm leading-relaxed text-text-secondary">
-                Prism highlights when buy-side or sell-side pressure becomes meaningful, so you can see what serious traders are doing instead of staring at a static probability.
+                Prism highlights when buy-side or sell-side pressure becomes meaningful, so you can see what serious traders are doing instead of staring at a static probability. The goal is simple: know whether price, conviction, and money flow are aligned before you size a trade.
               </p>
             </div>
 

@@ -40,6 +40,8 @@ export interface HighestScoringMarketApi {
   focus_outcome_label?: string | null;
   current_probability: number | null;
   probability_delta: number;
+  buy_notional?: number | null;
+  sell_notional?: number | null;
   signal: SignalApi;
 }
 
@@ -189,6 +191,8 @@ export interface HighestScoringMarketViewModel {
   focusOutcomeLabel: string | null;
   currentProbability: number | null;
   probabilityDelta: number;
+  buyNotional: number | null;
+  sellNotional: number | null;
   signal: SignalApi;
 }
 

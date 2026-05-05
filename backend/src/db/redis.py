@@ -3,6 +3,8 @@ from src.config import Config
 
 from src.utils.logger import logger
 
+ssl_kwargs = {"ssl_cert_reqs": "none"} if Config.REDIS_URL.startswith("rediss://") else {}
+
 # Initialize
 redis_client = Redis.from_url(
     Config.REDIS_URL,
@@ -11,6 +13,7 @@ redis_client = Redis.from_url(
     health_check_interval=30,
     socket_connect_timeout=10,
     socket_timeout=10,
+    **ssl_kwargs
 )
 
 async def check_redis_connection():

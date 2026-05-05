@@ -1,5 +1,5 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { useInfiniteQuery } from '@tanstack/react-query';
+import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
 import gsap from 'gsap';
 
 import { marketsApi } from '../../lib/api/markets';
@@ -13,6 +13,7 @@ export function TrackerPage() {
   const container = useRef<HTMLDivElement>(null);
   const hasAnimatedRef = useRef(false);
   const previousEventIdsRef = useRef<string[]>([]);
+  const queryClient = useQueryClient();
   const [tracked, setTracked] = useState<Record<string, boolean>>({});
   const [syncTimer, setSyncTimer] = useState(12);
   const trackerQuery = useInfiniteQuery({
@@ -30,6 +31,7 @@ export function TrackerPage() {
     staleTime: 15_000,
     gcTime: 5 * 60_000,
     refetchInterval: 30_000,
+    refetchOnMount: 'always',
     retry: 2,
   });
 
@@ -136,8 +138,12 @@ export function TrackerPage() {
         await marketsApi.trackEvent(id, undefined, source);
       } else {
         await marketsApi.untrackEvent(id, undefined, source);
-        await trackerQuery.refetch();
       }
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['tracker-feed'] }),
+        queryClient.invalidateQueries({ queryKey: ['discovery-feed'] }),
+      ]);
+      await trackerQuery.refetch();
     } catch (err) {
         console.error('Tracking action failed', err);
         setTracked((prev) => ({ ...prev, [id]: !isTracking }));

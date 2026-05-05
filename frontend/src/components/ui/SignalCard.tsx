@@ -1,5 +1,5 @@
 import React from 'react';
-import { Clock, Plus, Check } from 'lucide-react';
+import { Clock, Plus, Minus, Check } from 'lucide-react';
 import { useNavigate } from '@tanstack/react-router';
 import { useQuery } from '@tanstack/react-query';
 
@@ -31,18 +31,15 @@ export function SignalCard({ event, onTrack, isTracked = false, isTrackPending =
 
   let borderColor = 'border-border hover:border-prism-blue/40';
   let badgeColor = 'signal-badge-low';
-  let signalTextColor = 'signal-text-low';
   let classificationBadgeColor = 'signal-badge-low';
 
   if (isHighSignal) {
     borderColor = 'border-border hover:border-emerald-400/50';
     badgeColor = 'signal-badge-high';
-    signalTextColor = 'signal-text-high';
     classificationBadgeColor = 'signal-badge-high';
   } else if (isModerateSignal) {
     borderColor = 'border-border hover:border-slate-400/50';
     badgeColor = 'signal-badge-mid';
-    signalTextColor = 'signal-text-mid';
     classificationBadgeColor = 'signal-badge-mid';
   }
 
@@ -55,17 +52,16 @@ export function SignalCard({ event, onTrack, isTracked = false, isTrackPending =
       ? 'UP'
       : signal?.direction === 'FALLING'
         ? 'DOWN'
-      : 'FLAT';
+        : 'FLAT';
 
   const directionArrow =
     signal?.direction === 'RISING'
-      ? '↑'
+      ? '?'
       : signal?.direction === 'FALLING'
-        ? '↓'
-        : '→';
+        ? '?'
+        : '?';
 
   const probabilityDelta = topMarket ? topMarket.probabilityDelta * 100 : 0;
-  const ptsPrefix = probabilityDelta > 0 ? '+' : '';
   const ptsColor =
     probabilityDelta > 0
       ? 'signal-delta-up'
@@ -85,9 +81,20 @@ export function SignalCard({ event, onTrack, isTracked = false, isTrackPending =
         scoreDelta: event.scoreDelta48h,
         direction: signal?.direction ?? 'STABLE',
         classification: signal?.classification ?? 'unscored',
+        buyNotional: topMarket?.buyNotional ?? 0,
+        sellNotional: topMarket?.sellNotional ?? 0,
         marketTitle: topMarket?.marketTitle ?? event.title,
       }),
-    [event.scoreDelta48h, event.title, signal?.classification, signal?.direction, signal?.score, topMarket?.marketTitle],
+    [
+      event.scoreDelta48h,
+      event.title,
+      signal?.classification,
+      signal?.direction,
+      signal?.score,
+      topMarket?.buyNotional,
+      topMarket?.marketTitle,
+      topMarket?.sellNotional,
+    ],
   );
   const fallbackInsight = React.useMemo(() => {
     if (!topMarket) {
@@ -123,6 +130,26 @@ export function SignalCard({ event, onTrack, isTracked = false, isTrackPending =
     gcTime: 10 * 60 * 1000,
   });
 
+  const sparklinePoints = React.useMemo(() => {
+    const historyPoints = scoreHistoryQuery.data?.points ?? [];
+    if (historyPoints.length > 0) {
+      return historyPoints;
+    }
+
+    if (isLite || !signal) {
+      return [];
+    }
+
+    const currentScore = Math.max(0, Math.min(100, signal.score ?? 0));
+    const delta = event.scoreDelta48h ?? 0;
+    const baselineScore = Math.max(0, Math.min(100, currentScore - delta));
+
+    return [
+      { score: baselineScore, created_at: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString() },
+      { score: currentScore, created_at: new Date().toISOString() },
+    ];
+  }, [event.scoreDelta48h, isLite, scoreHistoryQuery.data?.points, signal]);
+
   const handleCardClick = () => {
     navigate({ to: `/app/events/${event.id}`, search: { source: event.source.toLowerCase(), origin } });
   };
@@ -139,10 +166,10 @@ export function SignalCard({ event, onTrack, isTracked = false, isTrackPending =
         <span className="rounded border border-border/60 bg-navy px-2 py-1 font-mono text-[10px] uppercase tracking-widest text-text-secondary shadow-sm">
           {event.source} / {event.currency}
         </span>
-          <span className={`rounded border px-2 py-0.5 font-mono text-xs font-bold shadow-sm ${badgeColor}`}>
-            {isTrackedAwaitingSignal ? 'TRACKED' : isLite ? 'LITE' : `SCORE ${signal?.score ?? 0} ${directionArrow}`}
-          </span>
-        </div>
+        <span className={`rounded border px-2 py-0.5 font-mono text-xs font-bold shadow-sm ${badgeColor}`}>
+          {isTrackedAwaitingSignal ? 'TRACKED' : isLite ? 'LITE' : `SCORE ${signal?.score ?? 0} ${directionArrow}`}
+        </span>
+      </div>
 
       <div className="relative z-10 mb-2 flex items-start gap-3 pr-2">
         <div className="mt-0.5 flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-xl border border-border/60 bg-navy shadow-sm">
@@ -172,7 +199,7 @@ export function SignalCard({ event, onTrack, isTracked = false, isTrackPending =
         </p>
         {!isLite && topMarket && (
           <div className="mt-3 flex items-center justify-between gap-3">
-            <ScoreSparkline points={scoreHistoryQuery.data?.points ?? []} loading={scoreHistoryQuery.isLoading} />
+            <ScoreSparkline points={sparklinePoints} loading={scoreHistoryQuery.isLoading && sparklinePoints.length === 0} />
             {event.scoreDelta48h !== null && event.scoreDelta48h !== 0 ? (
               <span className={`shrink-0 rounded border px-2 py-0.5 font-mono text-[10px] shadow-sm ${event.scoreDelta48h > 0 ? 'signal-badge-high' : 'signal-badge-low'}`}>
                 {event.scoreDelta48h > 0 ? '+' : ''}{Math.round(event.scoreDelta48h)} pts
@@ -225,11 +252,11 @@ export function SignalCard({ event, onTrack, isTracked = false, isTrackPending =
               isTrackPending
                 ? 'cursor-not-allowed border border-border bg-card text-text-muted'
                 : isTracked
-                ? 'signal-button-tracked'
-                : 'border border-prism-blue/20 bg-prism-blue/10 text-prism-blue hover:bg-prism-blue/20'
+                  ? 'border border-amber-400/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20'
+                  : 'border border-prism-blue/20 bg-prism-blue/10 text-prism-blue hover:bg-prism-blue/20'
             }`}
           >
-            {isTrackPending ? 'WORKING...' : isTracked ? <><Check size={12} /> TRACKED</> : <><Plus size={12} /> TRACK</>}
+            {isTrackPending ? 'WORKING...' : isTracked ? <><Minus size={12} /> UNTRACK</> : <><Plus size={12} /> TRACK</>}
           </button>
         </div>
       </div>

@@ -1,5 +1,5 @@
 import React, { useLayoutEffect, useRef, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useParams, useSearch } from '@tanstack/react-router';
 import { Activity, ArrowLeft, Droplets, ExternalLink, Sparkles, TrendingDown, TrendingUp, Users, Zap } from 'lucide-react';
 import gsap from 'gsap';
@@ -87,8 +87,10 @@ export function EventDetail() {
   const search = useSearch({ from: '/app/events/$eventId' }) as { source?: string; origin?: string };
   const navigate = useNavigate();
   const container = useRef<HTMLDivElement>(null);
+  const queryClient = useQueryClient();
 
   const [activeTabId, setActiveTabId] = useState('');
+  const [trackPending, setTrackPending] = useState(false);
   const requestedSource = search.source || undefined;
   const eventQuery = useQuery({
     queryKey: ['event-detail', eventId, requestedSource],
@@ -222,7 +224,44 @@ export function EventDetail() {
     enabled: !!eventId && !!selectedOutcome?.market_id,
     staleTime: 5 * 60_000,
     gcTime: 10 * 60_000,
+    refetchInterval: (query) => {
+      const pointCount = (query.state.data as { points?: unknown[] } | undefined)?.points?.length ?? 0;
+      return event?.tracking_enabled && pointCount < 3 ? 15_000 : false;
+    },
   });
+  const chartPoints = React.useMemo(() => {
+    const historyPoints = scoreHistoryQuery.data?.points ?? [];
+    if (historyPoints.length > 0) {
+      return historyPoints;
+    }
+
+    if (!selectedOutcome) {
+      return [];
+    }
+
+    const currentScore = Math.max(0, Math.min(100, selectedOutcome.signal.score ?? 0));
+    const currentProbability =
+      typeof selectedFocus.probability === 'number' ? Math.max(0, Math.min(1, selectedFocus.probability)) : null;
+    const deltaPoints = selectedOutcome.score_delta_48h ?? 0;
+    const baselineScore = Math.max(0, Math.min(100, currentScore - deltaPoints));
+    const probabilityDelta = selectedOutcome.probability_delta ?? 0;
+    const baselineProbability =
+      currentProbability === null ? null : Math.max(0, Math.min(1, currentProbability - probabilityDelta));
+
+    return [
+      {
+        score: baselineScore,
+        current_probability: baselineProbability,
+        created_at: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
+      },
+      {
+        score: currentScore,
+        current_probability: currentProbability,
+        created_at: new Date().toISOString(),
+      },
+    ];
+  }, [scoreHistoryQuery.data?.points, selectedFocus.probability, selectedOutcome]);
+
   const selectedFlowSignal = React.useMemo(() => {
     if (!selectedOutcome) {
       return null;
@@ -287,6 +326,29 @@ export function EventDetail() {
     ? Object.entries(selectedOutcome.signal.factors).filter(([, value]) => typeof value === 'number')
     : [];
 
+  const toggleTracking = async () => {
+    if (!event || trackPending) {
+      return;
+    }
+
+    setTrackPending(true);
+    try {
+      if (event.tracking_enabled) {
+        await marketsApi.untrackEvent(event.event_id, event.currency, event.source.toLowerCase());
+      } else {
+        await marketsApi.trackEvent(event.event_id, event.currency, event.source.toLowerCase());
+      }
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['event-detail', eventId] }),
+        queryClient.invalidateQueries({ queryKey: ['discovery-feed'] }),
+        queryClient.invalidateQueries({ queryKey: ['tracker-feed'] }),
+      ]);
+      await eventQuery.refetch();
+    } finally {
+      setTrackPending(false);
+    }
+  };
+
   return (
     <div ref={container} className="mx-auto flex max-w-4xl flex-col gap-6 px-6 py-8">
       <div className="flex items-center gap-2">
@@ -331,6 +393,20 @@ export function EventDetail() {
               View trade on {event.source} <ExternalLink size={12} />
             </button>
           )}
+          <button
+            type="button"
+            onClick={toggleTracking}
+            disabled={trackPending}
+            className={`inline-flex items-center gap-2 rounded border px-3 py-1.5 font-mono text-[11px] uppercase tracking-wide transition-colors ${
+              trackPending
+                ? 'cursor-not-allowed border-border bg-card text-text-muted'
+                : event.tracking_enabled
+                  ? 'border-amber-400/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20'
+                  : 'border-prism-blue/30 bg-navy px-3 py-1.5 text-prism-cyan hover:border-prism-blue hover:text-text-primary'
+            }`}
+          >
+            {trackPending ? 'Working...' : event.tracking_enabled ? 'Untrack event' : 'Track event'}
+          </button>
         </div>
       </div>
 
@@ -466,10 +542,32 @@ export function EventDetail() {
 
       <div className="dynamic-panel mt-4 flex w-full flex-col gap-6">
         <div className="rounded-xl border border-border bg-card p-5 sm:p-6">
-          <div className="mb-4 font-mono text-[10px] uppercase tracking-[0.22em] text-text-muted">
-            Conviction & Probability - 48h
+          <div className="mb-4 flex flex-col gap-3">
+            <div>
+              <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-text-muted">
+                Conviction & Probability - 48h
+              </div>
+              <p className="mt-2 max-w-2xl font-body text-sm leading-6 text-text-secondary">
+                Cyan tracks Prism conviction score, while violet tracks the market probability for the side Prism is focused on. When both rise together, the move is strengthening. When probability moves without conviction, treat it as weaker information.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-3 font-mono text-[10px] uppercase tracking-wider text-text-muted">
+              <span className="inline-flex items-center gap-2">
+                <span className="h-2.5 w-2.5 rounded-full bg-prism-cyan"></span>
+                Conviction
+              </span>
+              <span className="inline-flex items-center gap-2">
+                <span className="h-2.5 w-2.5 rounded-full bg-prism-violet"></span>
+                Probability
+              </span>
+              {scoreHistoryQuery.data?.points && scoreHistoryQuery.data.points.length < 3 ? (
+                <span className="rounded border border-prism-blue/30 bg-prism-blue/10 px-2 py-1 text-prism-cyan">
+                  Warm start: waiting for more live snapshots
+                </span>
+              ) : null}
+            </div>
           </div>
-          <ConvictionChart points={scoreHistoryQuery.data?.points ?? []} loading={scoreHistoryQuery.isLoading} />
+          <ConvictionChart points={chartPoints} loading={scoreHistoryQuery.isLoading && chartPoints.length === 0} />
         </div>
 
         <TopContendersPanel event={event} activeTabId={activeTabId} onSelect={setActiveTabId} />

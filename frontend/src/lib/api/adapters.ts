@@ -17,6 +17,8 @@ function mapHighestScoringMarket(apiEvent: DiscoveryEventApi): HighestScoringMar
     focusOutcomeLabel: topMarket.focus_outcome_label ?? null,
     currentProbability: topMarket.current_probability,
     probabilityDelta: topMarket.probability_delta,
+    buyNotional: topMarket.buy_notional ?? null,
+    sellNotional: topMarket.sell_notional ?? null,
     signal: topMarket.signal,
   };
 }

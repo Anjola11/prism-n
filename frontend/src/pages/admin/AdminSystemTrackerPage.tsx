@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 
 import { adminApi } from '../../lib/api/admin';
@@ -46,13 +46,19 @@ export function AdminSystemTrackerPage() {
     },
   });
 
-  const events: DiscoveryCardViewModel[] =
-    systemTrackerQuery.data?.pages.flatMap((page) => page.items.map(mapDiscoveryEvent)) || [];
+  const events: DiscoveryCardViewModel[] = useMemo(
+    () => systemTrackerQuery.data?.pages.flatMap((page) => page.items.map(mapDiscoveryEvent)) || [],
+    [systemTrackerQuery.data],
+  );
 
   React.useEffect(() => {
     if (events.length > 0) {
       setTracked((prev) => {
-        const next = Object.fromEntries(events.map((event) => [event.id, !!event.trackingEnabled]));
+        const next = { ...prev };
+        for (const event of events) {
+          const serverTracked = !!event.trackingEnabled;
+          next[event.id] = serverTracked || !!prev[event.id];
+        }
         const prevKeys = Object.keys(prev);
         const nextKeys = Object.keys(next);
         const isUnchanged =

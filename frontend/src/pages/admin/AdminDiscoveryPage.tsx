@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Filter } from 'lucide-react';
 
@@ -62,15 +62,21 @@ export function AdminDiscoveryPage() {
     },
   });
 
-  const events: DiscoveryCardViewModel[] =
-    discoveryQuery.data?.pages.flatMap((page) => page.items.map(mapDiscoveryEvent)) || [];
+  const events: DiscoveryCardViewModel[] = useMemo(
+    () => discoveryQuery.data?.pages.flatMap((page) => page.items.map(mapDiscoveryEvent)) || [],
+    [discoveryQuery.data],
+  );
   const showDiscoveryError =
     discoveryQuery.isError && !discoveryQuery.isLoading && events.length === 0;
 
   React.useEffect(() => {
     if (events.length > 0) {
       setTracked((prev) => {
-        const next = Object.fromEntries(events.map((event) => [event.id, !!event.trackingEnabled]));
+        const next = { ...prev };
+        for (const event of events) {
+          const serverTracked = !!event.trackingEnabled;
+          next[event.id] = serverTracked || !!prev[event.id];
+        }
         const prevKeys = Object.keys(prev);
         const nextKeys = Object.keys(next);
         const isUnchanged =

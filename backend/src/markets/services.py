@@ -649,6 +649,8 @@ class MarketServices:
             focus_outcome_label=focus_label,
             current_probability=focus_probability,
             probability_delta=focus_delta,
+            buy_notional=highest.buy_notional,
+            sell_notional=highest.sell_notional,
             signal=highest.signal,
         )
 
@@ -1147,6 +1149,8 @@ class MarketServices:
                         focus_outcome_label=first_market.get("outcome1Label", "YES"),
                         current_probability=first_market.get("outcome1Price"),
                         probability_delta=0.0,
+                        buy_notional=None,
+                        sell_notional=None,
                         signal=SignalRead(),
                     ) if first_market else None,
                 )
@@ -1196,6 +1200,8 @@ class MarketServices:
                         focus_outcome_label=yes_label,
                         current_probability=yes_price,
                         probability_delta=0.0,
+                        buy_notional=None,
+                        sell_notional=None,
                         signal=SignalRead(),
                     ) if first_market else None,
                 )
@@ -1313,39 +1319,49 @@ class MarketServices:
         *,
         user_id: UUID,
         event_id: str,
-        currency: Currency,
+        list_currency: Currency,
+        detail_currency: Currency | None = None,
     ) -> None:
+        effective_detail_currency = detail_currency or list_currency
         await self._safe_delete_read_model(
             namespace="tracker-feed",
-            identifier=self._tracker_cache_id(user_id=user_id, currency=currency),
+            identifier=self._tracker_cache_id(user_id=user_id, currency=list_currency),
         )
         await self._safe_delete_read_model(
             namespace="event-detail",
-            identifier=self._event_detail_cache_id(event_id=event_id, currency=currency),
+            identifier=self._event_detail_cache_id(event_id=event_id, currency=effective_detail_currency),
         )
         await self._safe_delete_read_model(
             namespace="event-ai-insight",
-            identifier=self._event_ai_insight_cache_id(event_id=event_id, currency=currency),
+            identifier=self._event_ai_insight_cache_id(event_id=event_id, currency=effective_detail_currency),
         )
 
     async def _invalidate_shared_read_models(
         self,
         *,
         event_id: str,
-        currency: Currency,
+        list_currency: Currency,
+        detail_currency: Currency | None = None,
+        include_system_tracker: bool = False,
     ) -> None:
+        effective_detail_currency = detail_currency or list_currency
         await self._safe_delete_read_model(
             namespace="discovery-listings",
-            identifier=self._discovery_listings_cache_id(currency=currency),
+            identifier=self._discovery_listings_cache_id(currency=list_currency),
         )
         await self._safe_delete_read_model(
             namespace="event-detail",
-            identifier=self._event_detail_cache_id(event_id=event_id, currency=currency),
+            identifier=self._event_detail_cache_id(event_id=event_id, currency=effective_detail_currency),
         )
         await self._safe_delete_read_model(
             namespace="event-ai-insight",
-            identifier=self._event_ai_insight_cache_id(event_id=event_id, currency=currency),
+            identifier=self._event_ai_insight_cache_id(event_id=event_id, currency=effective_detail_currency),
         )
+        if include_system_tracker:
+            await self._safe_delete_read_model(
+                namespace="tracker-feed",
+                identifier=f"system-{list_currency.value}",
+            )
 
     def _clone_event_detail_with_tracking(
         self,
@@ -1530,6 +1546,34 @@ class MarketServices:
             engine=MarketEngine.CLOB,
             markets=markets,
         )
+
+    async def _hydrate_polymarket_market_notionals(
+        self,
+        *,
+        markets: list[TrackedMarketCreate],
+    ) -> None:
+        if not self.polymarket_clob or not markets:
+            return
+
+        token_ids: list[str] = []
+        for market in markets:
+            if market.yes_outcome_id:
+                token_ids.append(market.yes_outcome_id)
+            if market.no_outcome_id:
+                token_ids.append(market.no_outcome_id)
+
+        if not token_ids:
+            return
+
+        books = await self.polymarket_clob.get_books(token_ids)
+        book_map = {str(book.get("asset_id")): book for book in books if book.get("asset_id")}
+
+        for market in markets:
+            yes_book = book_map.get(market.yes_outcome_id)
+            yes_bids = (yes_book or {}).get("bids") or []
+            yes_asks = (yes_book or {}).get("asks") or []
+            market.buy_notional = sum(self.polymarket_clob.level_total(level) for level in yes_bids)
+            market.sell_notional = sum(self.polymarket_clob.level_total(level) for level in yes_asks)
 
     async def _group_tracked_markets(
         self,
@@ -1755,7 +1799,12 @@ class MarketServices:
         session: AsyncSession,
         tracked_market: TrackedMarketCreate,
     ) -> TrackedMarket:
-        data = tracked_market.model_dump()
+        table_columns = set(TrackedMarket.__table__.columns.keys())
+        data = {
+            key: value
+            for key, value in tracked_market.model_dump().items()
+            if key in table_columns
+        }
         now = datetime.now(timezone.utc)
         insert_stmt = pg_insert(TrackedMarket).values(
             **data,
@@ -1795,11 +1844,16 @@ class MarketServices:
             return []
 
         overrides = overrides or {}
+        table_columns = set(TrackedMarket.__table__.columns.keys())
         now = datetime.now(timezone.utc)
         rows = []
         market_ids: list[str] = []
         for tracked_market in tracked_markets:
-            row = tracked_market.model_dump()
+            row = {
+                key: value
+                for key, value in tracked_market.model_dump().items()
+                if key in table_columns
+            }
             row.update(overrides)
             row["id"] = uuid4()
             row["created_at"] = now
@@ -1847,6 +1901,7 @@ class MarketServices:
         currency: Currency = Currency.DOLLAR,
     ) -> TrackEventResponse:
         logger.info("Tracking request started for user %s and event %s in %s", user_id, event_id, currency.value)
+        requested_currency = currency
         if source == MarketSource.POLYMARKET:
             if not self.polymarket:
                 raise HTTPException(
@@ -1863,6 +1918,12 @@ class MarketServices:
         else:
             event_payload = await self.bayse.get_event_by_id(event_id=event_id, currency=currency)
             normalized = self.normalize_event_to_tracked_markets(event_payload, currency=currency)
+
+        if normalized.source == MarketSource.POLYMARKET:
+            try:
+                await self._hydrate_polymarket_market_notionals(markets=normalized.markets)
+            except Exception:
+                logger.warning("Polymarket notional hydration failed for event %s", normalized.event_id, exc_info=True)
 
         persisted_markets = await self._upsert_tracked_markets(
             session,
@@ -1899,10 +1960,13 @@ class MarketServices:
             logger.info("Created user-tracked event row for user %s and event %s", user_id, normalized.event_id)
 
         await session.commit()
-        await self._refresh_subscription_plan_for_source(
-            session=session,
-            source=normalized.source,
-        )
+        try:
+            await self._refresh_subscription_plan_for_source(
+                session=session,
+                source=normalized.source,
+            )
+        except Exception:
+            logger.warning("Subscription plan refresh failed for tracked event %s", normalized.event_id, exc_info=True)
 
         if self.baseline_services:
             try:
@@ -1915,38 +1979,53 @@ class MarketServices:
                 logger.warning("Baseline refresh failed for event %s", normalized.event_id, exc_info=True)
 
         if self.live_state and persisted_markets:
-            first_market = persisted_markets[0]
-            await self.live_state.warm_event_state_from_tracking(
-                tracked_market=first_market,
-                currency=currency,
-                total_liquidity=normalized.total_liquidity,
-                tracked_markets_count=len(persisted_markets),
-            )
-            for tracked_market in persisted_markets:
-                await self.live_state.warm_market_state_from_tracking(
-                    tracked_market=tracked_market,
+            try:
+                first_market = persisted_markets[0]
+                await self.live_state.warm_event_state_from_tracking(
+                    tracked_market=first_market,
                     currency=currency,
                     total_liquidity=normalized.total_liquidity,
+                    tracked_markets_count=len(persisted_markets),
                 )
-            if normalized.source == MarketSource.POLYMARKET:
-                try:
-                    await self._warm_polymarket_tracked_markets_from_clob(
-                        session=session,
-                        persisted_markets=persisted_markets,
-                        event_id=normalized.event_id,
+                for tracked_market in persisted_markets:
+                    await self.live_state.warm_market_state_from_tracking(
+                        tracked_market=tracked_market,
+                        currency=currency,
                         total_liquidity=normalized.total_liquidity,
                     )
-                except Exception:
-                    logger.warning("Polymarket CLOB warm failed for event %s", normalized.event_id, exc_info=True)
-            await self._seed_initial_signal_states(
-                session=session,
-                persisted_markets=persisted_markets,
-                currency=currency,
-            )
+                if normalized.source == MarketSource.POLYMARKET:
+                    try:
+                        await self._warm_polymarket_tracked_markets_from_clob(
+                            session=session,
+                            persisted_markets=persisted_markets,
+                            event_id=normalized.event_id,
+                            total_liquidity=normalized.total_liquidity,
+                        )
+                    except Exception:
+                        logger.warning("Polymarket CLOB warm failed for event %s", normalized.event_id, exc_info=True)
+                await self._seed_initial_signal_states(
+                    session=session,
+                    persisted_markets=persisted_markets,
+                    currency=currency,
+                )
+            except Exception:
+                logger.warning("Live state warm failed for tracked event %s", normalized.event_id, exc_info=True)
 
         logger.info("Tracking request completed for user %s and event %s", user_id, normalized.event_id)
-        await self._invalidate_user_read_models(user_id=user_id, event_id=normalized.event_id, currency=currency)
-        await self._invalidate_shared_read_models(event_id=normalized.event_id, currency=currency)
+        try:
+            await self._invalidate_user_read_models(
+                user_id=user_id,
+                event_id=normalized.event_id,
+                list_currency=requested_currency,
+                detail_currency=normalized.currency,
+            )
+            await self._invalidate_shared_read_models(
+                event_id=normalized.event_id,
+                list_currency=requested_currency,
+                detail_currency=normalized.currency,
+            )
+        except Exception:
+            logger.warning("Read model invalidation failed for tracked event %s", normalized.event_id, exc_info=True)
 
         return TrackEventResponse(
             event_id=normalized.event_id,
@@ -1969,6 +2048,7 @@ class MarketServices:
         currency: Currency = Currency.DOLLAR,
     ) -> TrackEventResponse:
         logger.info("System tracking request started for event %s in %s", event_id, currency.value)
+        requested_currency = currency
         if source == MarketSource.POLYMARKET:
             if not self.polymarket:
                 raise HTTPException(
@@ -1985,6 +2065,16 @@ class MarketServices:
         else:
             event_payload = await self.bayse.get_event_by_id(event_id=event_id, currency=currency)
             normalized = self.normalize_event_to_tracked_markets(event_payload, currency=currency)
+
+        if normalized.source == MarketSource.POLYMARKET:
+            try:
+                await self._hydrate_polymarket_market_notionals(markets=normalized.markets)
+            except Exception:
+                logger.warning(
+                    "Polymarket notional hydration failed for system-tracked event %s",
+                    normalized.event_id,
+                    exc_info=True,
+                )
 
         persisted_markets = await self._upsert_tracked_markets(
             session,
@@ -2003,10 +2093,17 @@ class MarketServices:
             total_liquidity=normalized.total_liquidity,
         )
         await session.commit()
-        await self._refresh_subscription_plan_for_source(
-            session=session,
-            source=normalized.source,
-        )
+        try:
+            await self._refresh_subscription_plan_for_source(
+                session=session,
+                source=normalized.source,
+            )
+        except Exception:
+            logger.warning(
+                "Subscription plan refresh failed for system-tracked event %s",
+                normalized.event_id,
+                exc_info=True,
+            )
 
         if self.baseline_services:
             try:
@@ -2023,41 +2120,56 @@ class MarketServices:
                 )
 
         if self.live_state and persisted_markets:
-            first_market = persisted_markets[0]
-            await self.live_state.warm_event_state_from_tracking(
-                tracked_market=first_market,
-                currency=currency,
-                total_liquidity=normalized.total_liquidity,
-                tracked_markets_count=len(persisted_markets),
-            )
-            for tracked_market in persisted_markets:
-                await self.live_state.warm_market_state_from_tracking(
-                    tracked_market=tracked_market,
+            try:
+                first_market = persisted_markets[0]
+                await self.live_state.warm_event_state_from_tracking(
+                    tracked_market=first_market,
                     currency=currency,
                     total_liquidity=normalized.total_liquidity,
+                    tracked_markets_count=len(persisted_markets),
                 )
-            if normalized.source == MarketSource.POLYMARKET:
-                try:
-                    await self._warm_polymarket_tracked_markets_from_clob(
-                        session=session,
-                        persisted_markets=persisted_markets,
-                        event_id=normalized.event_id,
+                for tracked_market in persisted_markets:
+                    await self.live_state.warm_market_state_from_tracking(
+                        tracked_market=tracked_market,
+                        currency=currency,
                         total_liquidity=normalized.total_liquidity,
                     )
-                except Exception:
-                    logger.warning(
-                        "Polymarket CLOB warm failed for system-tracked event %s",
-                        normalized.event_id,
-                        exc_info=True,
-                    )
-            await self._seed_initial_signal_states(
-                session=session,
-                persisted_markets=persisted_markets,
-                currency=currency,
-            )
+                if normalized.source == MarketSource.POLYMARKET:
+                    try:
+                        await self._warm_polymarket_tracked_markets_from_clob(
+                            session=session,
+                            persisted_markets=persisted_markets,
+                            event_id=normalized.event_id,
+                            total_liquidity=normalized.total_liquidity,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Polymarket CLOB warm failed for system-tracked event %s",
+                            normalized.event_id,
+                            exc_info=True,
+                        )
+                await self._seed_initial_signal_states(
+                    session=session,
+                    persisted_markets=persisted_markets,
+                    currency=currency,
+                )
+            except Exception:
+                logger.warning("Live state warm failed for system-tracked event %s", normalized.event_id, exc_info=True)
 
         logger.info("System tracking request completed for event %s", normalized.event_id)
-        await self._invalidate_shared_read_models(event_id=normalized.event_id, currency=currency)
+        try:
+            await self._invalidate_shared_read_models(
+                event_id=normalized.event_id,
+                list_currency=requested_currency,
+                detail_currency=normalized.currency,
+                include_system_tracker=True,
+            )
+        except Exception:
+            logger.warning(
+                "Read model invalidation failed for system-tracked event %s",
+                normalized.event_id,
+                exc_info=True,
+            )
         return TrackEventResponse(
             event_id=normalized.event_id,
             event_title=normalized.event_title,
@@ -2080,6 +2192,7 @@ class MarketServices:
         currency: Currency = Currency.DOLLAR,
     ) -> TrackEventResponse:
         logger.info("Untrack request started for user %s and event %s", user_id, event_id)
+        requested_currency = currency
         effective_currency = Currency.DOLLAR if source == MarketSource.POLYMARKET else currency
         statement = select(UserTrackedEvent).where(
             UserTrackedEvent.user_id == user_id,
@@ -2099,10 +2212,13 @@ class MarketServices:
         user_tracking.updated_at = datetime.now(timezone.utc)
         session.add(user_tracking)
         await session.commit()
-        await self._refresh_subscription_plan_for_source(
-            session=session,
-            source=source,
-        )
+        try:
+            await self._refresh_subscription_plan_for_source(
+                session=session,
+                source=source,
+            )
+        except Exception:
+            logger.warning("Subscription plan refresh failed during untrack for event %s", event_id, exc_info=True)
 
         markets_statement = select(TrackedMarket).where(
             TrackedMarket.event_id == event_id,
@@ -2126,8 +2242,20 @@ class MarketServices:
             currency=effective_currency,
         )
         logger.info("Untrack request completed for user %s and event %s", user_id, event_id)
-        await self._invalidate_user_read_models(user_id=user_id, event_id=event_id, currency=effective_currency)
-        await self._invalidate_shared_read_models(event_id=event_id, currency=effective_currency)
+        try:
+            await self._invalidate_user_read_models(
+                user_id=user_id,
+                event_id=event_id,
+                list_currency=requested_currency,
+                detail_currency=effective_currency,
+            )
+            await self._invalidate_shared_read_models(
+                event_id=event_id,
+                list_currency=requested_currency,
+                detail_currency=effective_currency,
+            )
+        except Exception:
+            logger.warning("Read model invalidation failed during untrack for event %s", event_id, exc_info=True)
         return TrackEventResponse(
             event_id=first_market.event_id,
             event_title=first_market.event_title,
@@ -2343,6 +2471,7 @@ class MarketServices:
         source: MarketSource = MarketSource.BAYSE,
         currency: Currency = Currency.DOLLAR,
     ) -> TrackEventResponse:
+        requested_currency = currency
         effective_currency = Currency.DOLLAR if source == MarketSource.POLYMARKET else currency
         statement = select(TrackedMarket).where(
             TrackedMarket.event_id == event_id,
@@ -2362,10 +2491,13 @@ class MarketServices:
             session.add(market)
 
         await session.commit()
-        await self._refresh_subscription_plan_for_source(
-            session=session,
-            source=source,
-        )
+        try:
+            await self._refresh_subscription_plan_for_source(
+                session=session,
+                source=source,
+            )
+        except Exception:
+            logger.warning("Subscription plan refresh failed during system untrack for event %s", event_id, exc_info=True)
         first_market = markets[0]
         metric = await self._get_event_metric(
             session,
@@ -2373,7 +2505,15 @@ class MarketServices:
             source=first_market.source,
             currency=effective_currency,
         )
-        await self._invalidate_shared_read_models(event_id=event_id, currency=effective_currency)
+        try:
+            await self._invalidate_shared_read_models(
+                event_id=event_id,
+                list_currency=requested_currency,
+                detail_currency=effective_currency,
+                include_system_tracker=True,
+            )
+        except Exception:
+            logger.warning("Read model invalidation failed during system untrack for event %s", event_id, exc_info=True)
         return TrackEventResponse(
             event_id=first_market.event_id,
             event_title=first_market.event_title,

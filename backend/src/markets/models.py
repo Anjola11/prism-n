@@ -61,6 +61,8 @@ class TrackedMarket(SQLModel, table=True):
     inverse_probability: float | None = None
     market_total_orders: int | None = None
     event_total_orders: int | None = None
+    buy_notional: float | None = None
+    sell_notional: float | None = None
     closing_date: datetime | None = Field(
         default=None,
         sa_column=Column(pg.TIMESTAMP(timezone=True), nullable=True),
