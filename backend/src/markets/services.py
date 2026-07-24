@@ -53,7 +53,6 @@ from src.utils.polymarket import PolymarketServices
 
 
 class MarketServices:
-    DISCOVERY_LISTINGS_CACHE_TTL = 60
     TRACKER_CACHE_TTL = 45
     EVENT_DETAIL_CACHE_TTL = 15
     AI_INSIGHT_CACHE_TTL = 1800
@@ -61,8 +60,8 @@ class MarketServices:
     AI_INSIGHT_PLACEHOLDER = "AI insight is warming up."
     DISCOVERY_FEED_CACHE_TTL = 300
     DISCOVERY_FEED_BUILD_LOCK_TTL = 30
-    LIVE_STATE_MARKET_READ_CONCURRENCY = 6
-    TRACKER_EVENT_BUILD_CONCURRENCY = 3
+    LIVE_STATE_MARKET_READ_CONCURRENCY = 4
+    TRACKER_EVENT_BUILD_CONCURRENCY = 2
 
     def __init__(
         self,
@@ -172,8 +171,7 @@ class MarketServices:
         async with semaphore:
             return await awaitable
 
-    def _discovery_listings_cache_id(self, *, currency: Currency) -> str:
-        return f"discovery-listings:{currency.value}"
+
 
     def _tracker_cache_id(self, *, user_id: UUID, currency: Currency) -> str:
         return f"tracker:{user_id}:{currency.value}"
@@ -550,7 +548,7 @@ class MarketServices:
         if sell_notional is None:
             sell_notional = getattr(market, "sell_notional", None)
 
-        return EventMarketRead(
+        read_obj = EventMarketRead(
             market_id=market.market_id,
             market_title=market.market_title,
             market_image_url=market.market_image_url,
@@ -567,9 +565,23 @@ class MarketServices:
             sell_notional=sell_notional,
             probability_delta=probability_delta,
             event_liquidity=getattr(live_market, "event_liquidity", event_liquidity),
+            focus_outcome_side=None,
+            focus_outcome_label=None,
             signal=self._build_signal_read(signal_state=live_signal, market_state=live_market),
             last_updated=getattr(live_market, "last_updated_at", None),
         )
+        
+        focus_side, focus_label, _, _ = self._resolve_focus_outcome(
+            current_probability=read_obj.current_probability,
+            inverse_probability=read_obj.inverse_probability,
+            probability_delta=read_obj.probability_delta,
+            signal_direction=read_obj.signal.direction,
+            yes_outcome_label=read_obj.yes_outcome_label,
+            no_outcome_label=read_obj.no_outcome_label,
+        )
+        read_obj.focus_outcome_side = focus_side
+        read_obj.focus_outcome_label = focus_label
+        return read_obj
 
     async def _build_market_reads(
         self,
@@ -736,6 +748,109 @@ class MarketServices:
             ) if market.market_id in oldest_scores else market
             for market in markets
         ]
+
+    def _clamp_percentage(self, value: float | None) -> float | None:
+        if value is None:
+            return None
+        return max(0.0, min(1.0, value))
+
+    def _build_warmup_score_history_points(
+        self,
+        *,
+        observed_rows: list[tuple[float, float | None, datetime]],
+        current_market: EventMarketRead | None,
+        current_live_probability: float | None,
+    ) -> list[ScoreHistoryPoint]:
+        if current_market is None:
+            return []
+
+        now = datetime.now(timezone.utc)
+        current_time = self._parse_datetime(current_market.last_updated) or now
+        current_score = max(0.0, min(100.0, float(current_market.signal.score or 0.0)))
+        current_probability = self._clamp_percentage(current_market.current_probability)
+        observed_points = [
+            ScoreHistoryPoint(
+                score=score,
+                current_probability=self._clamp_percentage(probability),
+                created_at=created_at,
+                estimated=False,
+            )
+            for score, probability, created_at in observed_rows
+        ]
+
+        if len(observed_points) >= 3:
+            return observed_points
+
+        if observed_points:
+            first_observed = observed_points[0]
+            anchor_score = first_observed.score
+            anchor_probability = first_observed.current_probability
+            anchor_time = first_observed.created_at
+        else:
+            score_delta_48h = current_market.score_delta_48h or 0.0
+            anchor_score = max(0.0, min(100.0, current_score - score_delta_48h))
+            anchor_probability = self._clamp_percentage(current_live_probability if current_live_probability is not None else current_probability)
+            anchor_time = current_time - timedelta(hours=48)
+
+        midpoint_time = anchor_time + (current_time - anchor_time) / 2
+        midpoint_score = max(0.0, min(100.0, (anchor_score + current_score) / 2))
+        midpoint_probability = None
+        if anchor_probability is not None or current_probability is not None:
+            midpoint_probability = self._clamp_percentage(
+                ((anchor_probability if anchor_probability is not None else current_probability or 0.0) +
+                 (current_probability if current_probability is not None else anchor_probability or 0.0)) / 2
+            )
+
+        bridge_points: list[ScoreHistoryPoint] = []
+        if not observed_points:
+            bridge_points.append(
+                ScoreHistoryPoint(
+                    score=anchor_score,
+                    current_probability=anchor_probability,
+                    created_at=anchor_time,
+                    estimated=True,
+                )
+            )
+
+        if len(observed_points) <= 1:
+            bridge_points.append(
+                ScoreHistoryPoint(
+                    score=midpoint_score,
+                    current_probability=midpoint_probability,
+                    created_at=midpoint_time,
+                    estimated=True,
+                )
+            )
+
+        current_point = ScoreHistoryPoint(
+            score=current_score,
+            current_probability=current_probability,
+            created_at=current_time,
+            estimated=len(observed_points) == 0,
+        )
+
+        merged = [*observed_points, *bridge_points]
+        if not merged or abs((merged[-1].created_at - current_point.created_at).total_seconds()) > 60:
+            merged.append(current_point)
+        elif current_point.score != merged[-1].score or current_point.current_probability != merged[-1].current_probability:
+            merged[-1] = current_point
+
+        merged.sort(key=lambda point: point.created_at)
+
+        unique_points: list[ScoreHistoryPoint] = []
+        seen: set[tuple[str, float, float | None, bool]] = set()
+        for point in merged:
+            key = (
+                point.created_at.isoformat(),
+                round(point.score, 4),
+                round(point.current_probability, 6) if point.current_probability is not None else None,
+                point.estimated,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_points.append(point)
+        return unique_points
 
     def _format_notional_short(self, currency: Currency, amount: float | None) -> str:
         value = float(amount or 0.0)
@@ -1048,22 +1163,7 @@ class MarketServices:
             signal=SignalRead(),
         )
 
-    async def _get_cached_discovery_listings(self, *, currency: Currency) -> list[dict] | None:
-        payload = await self._safe_get_read_model(
-            namespace="discovery-listings",
-            identifier=self._discovery_listings_cache_id(currency=currency),
-        )
-        if not payload or not isinstance(payload, list):
-            return None
-        return payload
 
-    async def _set_cached_discovery_listings(self, *, currency: Currency, events: list[dict]) -> None:
-        await self._safe_set_read_model(
-            namespace="discovery-listings",
-            identifier=self._discovery_listings_cache_id(currency=currency),
-            payload=events,
-            ttl_seconds=self.DISCOVERY_LISTINGS_CACHE_TTL,
-        )
 
     async def _build_discovery_feed_fallback(
         self,
@@ -1345,10 +1445,6 @@ class MarketServices:
         include_system_tracker: bool = False,
     ) -> None:
         effective_detail_currency = detail_currency or list_currency
-        await self._safe_delete_read_model(
-            namespace="discovery-listings",
-            identifier=self._discovery_listings_cache_id(currency=list_currency),
-        )
         await self._safe_delete_read_model(
             namespace="event-detail",
             identifier=self._event_detail_cache_id(event_id=event_id, currency=effective_detail_currency),
@@ -2745,6 +2841,7 @@ class MarketServices:
                 ).order_by(MarketSignalSnapshot.created_at.asc())
             )
         ).all()
+        observed_count = len(rows)
 
         if len(rows) > 20:
             step = max(1, len(rows) // 20)
@@ -2753,17 +2850,62 @@ class MarketServices:
                 sampled_rows.append(rows[-1])
             rows = sampled_rows[:20] if len(sampled_rows) > 20 else sampled_rows
 
+        tracked_market = (
+            await session.exec(
+                select(TrackedMarket).where(
+                    TrackedMarket.event_id == event_id,
+                    TrackedMarket.market_id == resolved_market_id,
+                    TrackedMarket.source == source,
+                    TrackedMarket.tracking_enabled == True,
+                )
+            )
+        ).first()
+
+        current_market: EventMarketRead | None = None
+        current_live_probability: float | None = None
+        if tracked_market:
+            current_market = await self._build_market_read(
+                market=tracked_market,
+                currency=effective_currency,
+            )
+            current_market = (
+                await self._attach_market_score_deltas(
+                    session=session,
+                    markets=[current_market],
+                )
+            )[0]
+            if self.live_state:
+                live_market = await self.live_state.get_market_state(
+                    source=source,
+                    market_id=resolved_market_id,
+                    currency=effective_currency,
+                )
+                current_live_probability = getattr(live_market, "previous_probability", None)
+
+        points = self._build_warmup_score_history_points(
+            observed_rows=list(rows),
+            current_market=current_market,
+            current_live_probability=current_live_probability,
+        ) if observed_count < 3 else [
+            ScoreHistoryPoint(
+                score=score,
+                current_probability=current_probability,
+                created_at=created_at,
+            )
+            for score, current_probability, created_at in rows
+        ]
+
         response = ScoreHistoryRead(
             event_id=event_id,
             market_id=resolved_market_id,
-            points=[
-                ScoreHistoryPoint(
-                    score=score,
-                    current_probability=current_probability,
-                    created_at=created_at,
-                )
-                for score, current_probability, created_at in rows
-            ],
+            points=points,
+            observed_points=observed_count,
+            warmup=observed_count < 3,
+            note=(
+                "Warm-start view: Prism is blending live state with observed snapshots until enough real history accumulates."
+                if observed_count < 3
+                else None
+            ),
         )
         await self._safe_set_read_model(
             namespace="score-history",

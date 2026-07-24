@@ -339,17 +339,24 @@ class DiscoveryWorker:
             best_score = -1.0
             best_market: dict | None = None
 
+            # Fetch all signal states and market states in parallel
+            read_tasks = []
             for tm in tracked_markets:
-                signal_state = await self.live_state.get_signal_state(
+                read_tasks.append(self.live_state.get_signal_state(
                     source=tm.source,
                     market_id=tm.market_id,
                     currency=currency,
-                )
-                market_state = await self.live_state.get_market_state(
+                ))
+                read_tasks.append(self.live_state.get_market_state(
                     source=tm.source,
                     market_id=tm.market_id,
                     currency=currency,
-                )
+                ))
+            results = await asyncio.gather(*read_tasks)
+
+            for idx, tm in enumerate(tracked_markets):
+                signal_state = results[idx * 2]
+                market_state = results[idx * 2 + 1]
 
                 score = signal_state.score if signal_state else 0.0
                 prob = (
@@ -485,19 +492,26 @@ class DiscoveryWorker:
                 else (metric.total_liquidity if metric else total_liquidity)
             )
 
+            # Fetch all signal states and market states in parallel
+            read_tasks = []
+            for tm in tracked_markets:
+                read_tasks.append(self.live_state.get_signal_state(
+                    source=tm.source,
+                    market_id=tm.market_id,
+                    currency=Currency.DOLLAR,
+                ))
+                read_tasks.append(self.live_state.get_market_state(
+                    source=tm.source,
+                    market_id=tm.market_id,
+                    currency=Currency.DOLLAR,
+                ))
+            results = await asyncio.gather(*read_tasks)
+
             best_score = -1.0
             best_market = None
-            for tm in tracked_markets:
-                signal_state = await self.live_state.get_signal_state(
-                    source=tm.source,
-                    market_id=tm.market_id,
-                    currency=Currency.DOLLAR,
-                )
-                market_state = await self.live_state.get_market_state(
-                    source=tm.source,
-                    market_id=tm.market_id,
-                    currency=Currency.DOLLAR,
-                )
+            for idx, tm in enumerate(tracked_markets):
+                signal_state = results[idx * 2]
+                market_state = results[idx * 2 + 1]
                 score = signal_state.score if signal_state else 0.0
                 prob = (
                     market_state.current_probability

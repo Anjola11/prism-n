@@ -130,6 +130,8 @@ class EventMarketRead(BaseModel):
     probability_delta: float = 0.0
     score_delta_48h: float | None = None
     event_liquidity: float | None = None
+    focus_outcome_side: str | None = None
+    focus_outcome_label: str | None = None
     signal: SignalRead = Field(default_factory=SignalRead)
     last_updated: str | None = None
 
@@ -194,12 +196,16 @@ class ScoreHistoryPoint(BaseModel):
     score: float
     current_probability: float | None = None
     created_at: datetime
+    estimated: bool = False
 
 
 class ScoreHistoryRead(BaseModel):
     event_id: str
     market_id: str
     points: list[ScoreHistoryPoint]
+    observed_points: int = 0
+    warmup: bool = False
+    note: str | None = None
 
 
 class SuccessResponse(BaseModel):

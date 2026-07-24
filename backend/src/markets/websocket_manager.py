@@ -403,6 +403,7 @@ class BayseWebSocketManager:
         if message_type in {"buy_order", "sell_order"}:
             await self._handle_activity_update(message)
             return
+
         if message_type == "orderbook_update":
             await self._handle_orderbook_update(message)
             return
@@ -471,16 +472,15 @@ class BayseWebSocketManager:
 
     async def _handle_activity_update(self, message: dict[str, Any]) -> None:
         payload = message.get("data") or {}
-        order = payload.get("order") or {}
         market = payload.get("market") or {}
         event = payload.get("event") or {}
+        order = payload.get("order") or {}
 
         event_id = str(event.get("id") or payload.get("eventId") or "")
         market_id = str(market.get("id") or payload.get("marketId") or "")
         if not market_id:
             return
 
-        side = "BUY" if message.get("type") == "buy_order" else "SELL"
         order_currency = self._safe_currency(order.get("currency") or payload.get("currency"))
         if order_currency:
             currencies = [order_currency]
@@ -489,25 +489,7 @@ class BayseWebSocketManager:
         else:
             currencies = [Currency.DOLLAR]
 
-        amount = order.get("amount")
-        quantity = order.get("quantity")
-        price = order.get("price")
-        notional = self._to_float(amount)
-        if notional is None and quantity is not None and price is not None:
-            quantity_value = self._to_float(quantity)
-            price_value = self._to_float(price)
-            if quantity_value is not None and price_value is not None:
-                notional = quantity_value * price_value
-        notional = notional or 0.0
-
         for currency in currencies:
-            await self.live_state.increment_trade_flow(
-                source=MarketSource.BAYSE,
-                market_id=market_id,
-                currency=currency,
-                side=side,
-                notional=notional,
-            )
             await self._score_market(market_id=market_id, currency=currency)
 
     async def _handle_orderbook_update(self, message: dict[str, Any]) -> None:
@@ -533,6 +515,8 @@ class BayseWebSocketManager:
             top_ask_depth=self._extract_level_total(asks[0]) if asks else 0.0,
             top_5_bid_depth=sum(self._extract_level_total(level) for level in bids[:5]),
             top_5_ask_depth=sum(self._extract_level_total(level) for level in asks[:5]),
+            buy_notional=sum(self._extract_level_total(level) for level in bids),
+            sell_notional=sum(self._extract_level_total(level) for level in asks),
             spread_bps=spread_bps,
             orderbook_supported=True,
         )
