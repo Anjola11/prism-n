@@ -1,7 +1,7 @@
 import React, { useLayoutEffect, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useParams, useSearch } from '@tanstack/react-router';
-import { Activity, ArrowLeft, Droplets, ExternalLink, Sparkles, TrendingDown, TrendingUp, Users, Zap } from 'lucide-react';
+import { Activity, ArrowLeft, Droplets, ExternalLink, RefreshCw, Sparkles, TrendingDown, TrendingUp, Users, Zap } from 'lucide-react';
 import gsap from 'gsap';
 
 import { marketsApi } from '../../lib/api/markets';
@@ -21,38 +21,16 @@ function resolveMarketFocus(market: EventMarketApi | null | undefined) {
     };
   }
 
-  if (market.probability_delta > 0 || market.signal.direction === 'RISING') {
-    return {
-      side: 'YES',
-      label: market.yes_outcome_label || 'YES',
-      probability: market.current_probability,
-    };
-  }
-
-  if (market.probability_delta < 0 || market.signal.direction === 'FALLING') {
-    return {
-      side: 'NO',
-      label: market.no_outcome_label || 'NO',
-      probability: market.inverse_probability,
-    };
-  }
-
-  if (
-    typeof market.current_probability === 'number' &&
-    typeof market.inverse_probability === 'number' &&
-    market.inverse_probability > market.current_probability
-  ) {
-    return {
-      side: 'NO',
-      label: market.no_outcome_label || 'NO',
-      probability: market.inverse_probability,
-    };
-  }
+  const side = market.focus_outcome_side || 'YES';
+  const label = side === 'YES'
+    ? (market.focus_outcome_label || market.yes_outcome_label || 'YES')
+    : (market.focus_outcome_label || market.no_outcome_label || 'NO');
+  const probability = side === 'YES' ? market.current_probability : market.inverse_probability;
 
   return {
-    side: 'YES',
-    label: market.yes_outcome_label || 'YES',
-    probability: market.current_probability,
+    side,
+    label,
+    probability,
   };
 }
 
@@ -91,6 +69,8 @@ export function EventDetail() {
 
   const [activeTabId, setActiveTabId] = useState('');
   const [trackPending, setTrackPending] = useState(false);
+  const [refreshPending, setRefreshPending] = useState(false);
+  const [refreshCooldown, setRefreshCooldown] = useState(false);
   const requestedSource = search.source || undefined;
   const eventQuery = useQuery({
     queryKey: ['event-detail', eventId, requestedSource],
@@ -98,7 +78,7 @@ export function EventDetail() {
     enabled: !!eventId,
     staleTime: 15_000,
     gcTime: 5 * 60_000,
-    refetchInterval: 30_000,
+    refetchInterval: 15_000,
     placeholderData: (previousData) => previousData,
   });
 
@@ -225,8 +205,8 @@ export function EventDetail() {
     staleTime: 5 * 60_000,
     gcTime: 10 * 60_000,
     refetchInterval: (query) => {
-      const pointCount = (query.state.data as { points?: unknown[] } | undefined)?.points?.length ?? 0;
-      return event?.tracking_enabled && pointCount < 3 ? 15_000 : false;
+      const observedPoints = (query.state.data as { observed_points?: number } | undefined)?.observed_points ?? 0;
+      return event?.tracking_enabled && observedPoints < 3 ? 15_000 : 60_000;
     },
   });
   const chartPoints = React.useMemo(() => {
@@ -253,11 +233,13 @@ export function EventDetail() {
         score: baselineScore,
         current_probability: baselineProbability,
         created_at: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
+        estimated: true,
       },
       {
         score: currentScore,
         current_probability: currentProbability,
         created_at: new Date().toISOString(),
+        estimated: true,
       },
     ];
   }, [scoreHistoryQuery.data?.points, selectedFocus.probability, selectedOutcome]);
@@ -271,21 +253,23 @@ export function EventDetail() {
     const total = buy + sell;
     const buyRatio = total > 0 ? buy / total : 0.5;
     const divergence = buyRatio > 0.65 || buyRatio < 0.35;
+    const matchesLeader = event?.highest_scoring_market?.market_id === selectedOutcome.market_id;
+
     return {
       buy_ratio: buyRatio,
       buy_notional: buy,
       sell_notional: sell,
-      unusual_flow: event?.flow_signal?.unusual_flow ?? false,
+      unusual_flow: matchesLeader ? (event?.flow_signal?.unusual_flow ?? false) : false,
       divergence,
       flow_note:
-        event?.flow_signal?.flow_note ||
+        (matchesLeader && event?.flow_signal?.flow_note) ||
         (buyRatio > 0.65
           ? 'Buy flow is dominant on the selected market.'
           : buyRatio < 0.35
             ? 'Sell pressure is dominant on the selected market.'
             : 'Balanced flow - no clear directional pressure'),
     };
-  }, [event?.flow_signal?.flow_note, event?.flow_signal?.unusual_flow, selectedOutcome]);
+  }, [event?.flow_signal?.flow_note, event?.flow_signal?.unusual_flow, event?.highest_scoring_market?.market_id, selectedOutcome]);
 
   useLayoutEffect(() => {
     if (!event || !selectedOutcome) return;
@@ -349,6 +333,27 @@ export function EventDetail() {
     }
   };
 
+  const handleRefresh = async () => {
+    if (!event || refreshPending || refreshCooldown) return;
+    setRefreshPending(true);
+    try {
+      await marketsApi.refreshEvent(event.event_id, event.currency, event.source.toLowerCase());
+      // Invalidate all queries for this event so fresh data renders immediately
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['event-detail', eventId] }),
+        queryClient.invalidateQueries({ queryKey: ['score-history', eventId] }),
+      ]);
+      await eventQuery.refetch();
+    } catch {
+      // Silently ignore — the auto-refetch at 15s will catch it
+    } finally {
+      setRefreshPending(false);
+      // 30s cooldown to prevent CLOB API rate-limit hammering
+      setRefreshCooldown(true);
+      setTimeout(() => setRefreshCooldown(false), 30_000);
+    }
+  };
+
   return (
     <div ref={container} className="mx-auto flex max-w-4xl flex-col gap-6 px-6 py-8">
       <div className="flex items-center gap-2">
@@ -391,6 +396,29 @@ export function EventDetail() {
               className="inline-flex items-center gap-2 rounded border border-prism-blue/30 bg-navy px-3 py-1.5 font-mono text-[11px] uppercase tracking-wide text-prism-cyan transition-colors hover:border-prism-blue hover:text-text-primary"
             >
               View trade on {event.source} <ExternalLink size={12} />
+            </button>
+          )}
+          {/* Refresh button — available for Polymarket events */}
+          {event.source === 'POLYMARKET' && (
+            <button
+              id="refresh-market-data-btn"
+              type="button"
+              onClick={handleRefresh}
+              disabled={refreshPending || refreshCooldown}
+              title={refreshCooldown ? 'Please wait 30s between refreshes' : 'Fetch latest prices from Polymarket CLOB'}
+              className={`inline-flex items-center gap-1.5 rounded border px-3 py-1.5 font-mono text-[11px] uppercase tracking-wide transition-all ${
+                refreshPending
+                  ? 'cursor-not-allowed border-border bg-card text-text-muted'
+                  : refreshCooldown
+                    ? 'cursor-not-allowed border-border/40 bg-card/50 text-text-dim'
+                    : 'border-prism-cyan/30 bg-prism-cyan/8 text-prism-cyan hover:border-prism-cyan/60 hover:bg-prism-cyan/15'
+              }`}
+            >
+              <RefreshCw
+                size={11}
+                className={refreshPending ? 'animate-spin' : ''}
+              />
+              {refreshPending ? 'Refreshing...' : refreshCooldown ? 'Refreshed' : 'Refresh'}
             </button>
           )}
           <button
@@ -551,7 +579,7 @@ export function EventDetail() {
                 Cyan tracks Prism conviction score, while violet tracks the market probability for the side Prism is focused on. When both rise together, the move is strengthening. When probability moves without conviction, treat it as weaker information.
               </p>
             </div>
-            <div className="flex flex-wrap items-center gap-3 font-mono text-[10px] uppercase tracking-wider text-text-muted">
+            <div className="flex flex-col items-start gap-2 font-mono text-[10px] uppercase tracking-wider text-text-muted">
               <span className="inline-flex items-center gap-2">
                 <span className="h-2.5 w-2.5 rounded-full bg-prism-cyan"></span>
                 Conviction
@@ -567,7 +595,12 @@ export function EventDetail() {
               ) : null}
             </div>
           </div>
-          <ConvictionChart points={chartPoints} loading={scoreHistoryQuery.isLoading && chartPoints.length === 0} />
+          <ConvictionChart
+            points={chartPoints}
+            loading={scoreHistoryQuery.isLoading && chartPoints.length === 0}
+            observedPoints={scoreHistoryQuery.data?.observed_points ?? 0}
+            note={scoreHistoryQuery.data?.note}
+          />
         </div>
 
         <TopContendersPanel event={event} activeTabId={activeTabId} onSelect={setActiveTabId} />

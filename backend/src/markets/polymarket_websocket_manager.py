@@ -10,7 +10,7 @@ from sqlalchemy import false, or_
 from sqlmodel import select
 from websockets.asyncio.client import ClientConnection
 
-from src.db.main import async_session_maker
+from src.db.main import bg_session_maker
 from src.markets.baselines import BaselineServices
 from src.markets.live_state import (
     AssetMappingLiveState,
@@ -41,6 +41,9 @@ class AssetBinding:
 class PolymarketWebSocketManager:
     WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
     SUBSCRIPTION_BATCH_SIZE = 100
+    # If no frame is received within this window the connection is considered stale
+    # and we actively close + reconnect rather than waiting for a TCP timeout.
+    MESSAGE_TIMEOUT_SECONDS = 120
 
     def __init__(
         self,
@@ -77,10 +80,12 @@ class PolymarketWebSocketManager:
         self._asset_books: dict[str, dict[str, Any]] = {}
         self._baseline_cache: dict[tuple[str, str], float | None] = {}
         self._last_message_at: str | None = None
+        self._last_message_monotonic: float = 0.0
         self._last_connect_at: str | None = None
         self._reconnect_count: int = 0
         self._last_error: str | None = None
         self._last_subscription_plan_version: str | None = None
+        self._frame_log_count: int = 0
 
     async def start(self) -> None:
         if self._task and not self._task.done():
@@ -136,6 +141,7 @@ class PolymarketWebSocketManager:
                     attempt = 0
                     self._last_connect_at = datetime.now(timezone.utc).isoformat()
                     self._last_error = None
+                    self._frame_log_count = 0
                     logger.info("Connected to Polymarket websocket")
                     await self._handle_connection(ws)
             except asyncio.CancelledError:
@@ -169,19 +175,21 @@ class PolymarketWebSocketManager:
 
     async def _handle_connection(self, ws: ClientConnection) -> None:
         self._active_asset_ids.clear()
-        await self._resync_tracked_markets_from_rest()
-        await self._sync_subscriptions()
+        self._last_message_monotonic = asyncio.get_event_loop().time()
+        self._ping_task = asyncio.create_task(
+            self._ping_and_watchdog_loop(ws),
+            name="polymarket-websocket-ping",
+        )
         self._subscription_sync_task = asyncio.create_task(
             self._subscription_sync_loop(),
             name="polymarket-websocket-subscription-sync",
         )
-        self._ping_task = asyncio.create_task(
-            self._ping_loop(),
-            name="polymarket-websocket-ping",
-        )
+        await self._sync_subscriptions()
+        await self._resync_tracked_markets_from_rest()
 
         try:
             async for raw_frame in ws:
+                self._last_message_monotonic = asyncio.get_event_loop().time()
                 await self._handle_raw_frame(raw_frame)
         finally:
             for task in (self._subscription_sync_task, self._ping_task):
@@ -195,12 +203,41 @@ class PolymarketWebSocketManager:
             self._ping_task = None
             await self._mark_active_subscriptions_inactive()
 
-    async def _ping_loop(self) -> None:
+    async def _ping_and_watchdog_loop(self, ws: ClientConnection) -> None:
+        """Send periodic PING frames AND enforce a message-timeout watchdog.
+
+        If we have not received any frame from Polymarket within MESSAGE_TIMEOUT_SECONDS
+        the connection is considered silently stale (TCP still up but server stopped
+        sending).  We actively close the socket which causes the `async for` iterator
+        in _handle_connection to exit, which triggers a reconnect from run().
+        """
+        loop = asyncio.get_event_loop()
         while not self._stop_event.is_set() and self._ws:
             await asyncio.sleep(self.ping_interval_seconds)
             if self._stop_event.is_set() or not self._ws:
                 return
-            await self._ws.send("PING")
+
+            # Watchdog check
+            idle_seconds = loop.time() - self._last_message_monotonic
+            if idle_seconds > self.MESSAGE_TIMEOUT_SECONDS:
+                logger.warning(
+                    "Polymarket WS message timeout: no frame in %.0fs (threshold %ds). "
+                    "Closing connection to force reconnect.",
+                    idle_seconds,
+                    self.MESSAGE_TIMEOUT_SECONDS,
+                )
+                self._last_error = f"Message timeout after {idle_seconds:.0f}s"
+                try:
+                    await ws.close()
+                except Exception:
+                    pass
+                return
+
+            # Normal PING
+            try:
+                await ws.send("PING")
+            except Exception:
+                return
 
     async def _subscription_sync_loop(self) -> None:
         while not self._stop_event.is_set() and self._ws:
@@ -213,63 +250,78 @@ class PolymarketWebSocketManager:
         if not self._ws:
             return
 
+        logger.info("Starting Polymarket subscription sync")
         desired_bindings, plan_version = await self._load_tracked_asset_bindings()
+        logger.info("Loaded Polymarket subscription plan bindings=%s version=%s", len(desired_bindings), plan_version)
         if plan_version == self._last_subscription_plan_version and self._active_asset_ids:
+            logger.info("Skipping Polymarket subscription sync because plan version is unchanged")
             return
         desired_asset_ids = set(desired_bindings)
 
         self._asset_bindings = desired_bindings
-
-        for binding in desired_bindings.values():
-            await self.live_state.set_asset_mapping(
-                AssetMappingLiveState(
-                    source=MarketSource.POLYMARKET,
-                    asset_id=binding.asset_id,
-                    event_id=binding.event_id,
-                    market_id=binding.market_id,
-                    currency=binding.currency,
-                    outcome_side=binding.outcome_side,
-                )
-            )
-
         to_unsubscribe = sorted(self._active_asset_ids - desired_asset_ids)
         to_subscribe = sorted(desired_asset_ids - self._active_asset_ids)
+
+        logger.info(
+            "Polymarket websocket sync desired=%s subscribe=%s unsubscribe=%s active=%s",
+            len(desired_asset_ids),
+            len(to_subscribe),
+            len(to_unsubscribe),
+            len(self._active_asset_ids),
+        )
 
         if to_unsubscribe:
             for batch in self._chunk(to_unsubscribe, self.SUBSCRIPTION_BATCH_SIZE):
                 payload = {"operation": "unsubscribe", "assets_ids": batch}
+                logger.info("Sending Polymarket unsubscribe batch size=%s", len(batch))
                 await self._ws.send(json.dumps(payload))
             self._active_asset_ids -= set(to_unsubscribe)
 
         if to_subscribe:
-            initial_dump = len(self._active_asset_ids) == 0
+            first_batch = True
             for batch in self._chunk(to_subscribe, self.SUBSCRIPTION_BATCH_SIZE):
-                payload: dict[str, Any] = {
-                    "operation": "subscribe" if not initial_dump else None,
-                    "assets_ids": batch,
-                    "type": "market",
-                    "initial_dump": initial_dump,
-                    "level": 2,
-                    "custom_feature_enabled": True,
-                }
-                if initial_dump:
-                    payload.pop("operation", None)
+                if first_batch and not self._active_asset_ids:
+                    payload: dict[str, Any] = {
+                        "assets_ids": batch,
+                        "type": "market",
+                        "custom_feature_enabled": True,
+                    }
+                else:
+                    payload = {
+                        "operation": "subscribe",
+                        "assets_ids": batch,
+                    }
+                logger.info("Sending Polymarket subscribe batch size=%s initial=%s", len(batch), first_batch and not self._active_asset_ids)
                 await self._ws.send(json.dumps(payload))
-                initial_dump = False
+                first_batch = False
+                await asyncio.sleep(0.05)
             self._active_asset_ids |= set(to_subscribe)
 
-        subscription_count = 0
-        for binding in desired_bindings.values():
-            await self.live_state.set_subscription_state(
-                SubscriptionLiveState(
-                    source=MarketSource.POLYMARKET,
-                    event_id=binding.event_id,
-                    market_id=binding.market_id,
-                    channel=f"market:{binding.asset_id}",
-                    active=binding.asset_id in self._active_asset_ids,
-                )
+        logger.info("Syncing Polymarket asset mappings & subscription states count=%s", len(desired_bindings))
+        mapping_states = [
+            AssetMappingLiveState(
+                source=MarketSource.POLYMARKET,
+                asset_id=binding.asset_id,
+                event_id=binding.event_id,
+                market_id=binding.market_id,
+                currency=binding.currency,
+                outcome_side=binding.outcome_side,
             )
-            subscription_count += 1
+            for binding in desired_bindings.values()
+        ]
+        await self.live_state.set_asset_mappings_bulk(mapping_states)
+
+        subscription_states = [
+            SubscriptionLiveState(
+                source=MarketSource.POLYMARKET,
+                event_id=binding.event_id,
+                market_id=binding.market_id,
+                channel=f"market:{binding.asset_id}",
+                active=binding.asset_id in self._active_asset_ids,
+            )
+            for binding in desired_bindings.values()
+        ]
+        await self.live_state.set_subscription_states_bulk(subscription_states)
 
         logger.info(
             "Polymarket websocket subscription sync complete assets=%s active=%s",
@@ -277,6 +329,7 @@ class PolymarketWebSocketManager:
             len(self._active_asset_ids),
         )
         self._last_subscription_plan_version = plan_version
+
 
     async def _load_tracked_asset_bindings(self) -> tuple[dict[str, AssetBinding], str]:
         cached_plan = await self.live_state.get_subscription_plan(identifier=MarketSource.POLYMARKET.value)
@@ -310,7 +363,7 @@ class PolymarketWebSocketManager:
         return bindings
 
     async def _build_subscription_plan_from_db(self) -> PolymarketSubscriptionPlan:
-        async with async_session_maker() as session:
+        async with bg_session_maker() as session:
             tracked_event_ids = set(
                 await session.exec(
                     select(UserTrackedEvent.event_id).where(UserTrackedEvent.tracking_enabled == True)
@@ -360,6 +413,9 @@ class PolymarketWebSocketManager:
     async def _handle_raw_frame(self, raw_frame: str) -> None:
         if raw_frame == "PONG":
             return
+        if self._frame_log_count < 5:
+            logger.info("Polymarket raw frame sample %s: %s", self._frame_log_count + 1, raw_frame[:500])
+            self._frame_log_count += 1
         try:
             payload = json.loads(raw_frame)
         except json.JSONDecodeError:
@@ -398,10 +454,71 @@ class PolymarketWebSocketManager:
         if event_type == "best_bid_ask":
             await self._handle_best_bid_ask(message)
             return
-        if event_type in {"tick_size_change", "new_market", "market_resolved"}:
+        if event_type == "market_resolved":
+            await self._handle_market_resolved(message)
+            return
+        if event_type in {"tick_size_change", "new_market"}:
             logger.info("Received Polymarket lifecycle event %s", event_type)
             return
         logger.info("Ignoring unsupported Polymarket websocket message type %s", event_type)
+
+    async def _handle_market_resolved(self, message: dict[str, Any]) -> None:
+        market_id = message.get("id") or message.get("market_id")
+
+        if not market_id:
+            assets = message.get("assets_ids") or []
+            for asset_id in assets:
+                binding = await self._get_asset_binding(str(asset_id))
+                if binding:
+                    market_id = binding.market_id
+                    break
+
+        if not market_id and message.get("asset_id"):
+            binding = await self._get_asset_binding(str(message["asset_id"]))
+            if binding:
+                market_id = binding.market_id
+
+        if not market_id:
+            logger.warning("Could not resolve market_id for resolution message: %s", message)
+            return
+
+        logger.info("Processing resolution for Polymarket market %s", market_id)
+        yes_token = None
+        no_token = None
+
+        async with bg_session_maker() as session:
+            db_market = (
+                await session.exec(
+                    select(TrackedMarket).where(
+                        TrackedMarket.source == MarketSource.POLYMARKET,
+                        TrackedMarket.market_id == market_id,
+                    )
+                )
+            ).first()
+
+            if db_market:
+                db_market.tracking_enabled = False
+                db_market.updated_at = datetime.now(timezone.utc)
+                session.add(db_market)
+                await session.commit()
+                yes_token = db_market.yes_outcome_id
+                no_token = db_market.no_outcome_id
+
+        keys_to_delete = [
+            self.live_state.market_key(source=MarketSource.POLYMARKET, market_id=market_id, currency=Currency.DOLLAR),
+            self.live_state.signal_key(source=MarketSource.POLYMARKET, market_id=market_id, currency=Currency.DOLLAR),
+            self.live_state.persistence_key(source=MarketSource.POLYMARKET, market_id=market_id, currency=Currency.DOLLAR),
+        ]
+        if yes_token:
+            keys_to_delete.append(self.live_state.asset_mapping_key(source=MarketSource.POLYMARKET, asset_id=yes_token))
+        if no_token:
+            keys_to_delete.append(self.live_state.asset_mapping_key(source=MarketSource.POLYMARKET, asset_id=no_token))
+
+        for key in keys_to_delete:
+            await self.live_state._execute_redis(self.live_state.redis.delete(key))
+
+        logger.info("Deleted Redis keys for resolved market %s: %s", market_id, keys_to_delete)
+        await self._sync_subscriptions()
 
     async def _handle_book(self, message: dict[str, Any]) -> None:
         asset_id = str(message.get("asset_id") or "")
@@ -468,6 +585,10 @@ class PolymarketWebSocketManager:
             ticker_supported=True,
             **updates,
         )
+        await self._touch_event_state(
+            event_id=binding.event_id,
+            currency=binding.currency,
+        )
         await self._score_market(market_id=binding.market_id, currency=binding.currency)
 
     async def _handle_best_bid_ask(self, message: dict[str, Any]) -> None:
@@ -502,6 +623,10 @@ class PolymarketWebSocketManager:
             market_id=binding.market_id,
             currency=binding.currency,
             **updates,
+        )
+        await self._touch_event_state(
+            event_id=binding.event_id,
+            currency=binding.currency,
         )
         await self._score_market(market_id=binding.market_id, currency=binding.currency)
 
@@ -556,7 +681,25 @@ class PolymarketWebSocketManager:
             currency=binding.currency,
             **updates,
         )
+        await self._touch_event_state(
+            event_id=binding.event_id,
+            currency=binding.currency,
+        )
         await self._score_market(market_id=binding.market_id, currency=binding.currency)
+
+    async def _touch_event_state(self, *, event_id: str, currency: Currency) -> None:
+        try:
+            await self.live_state.update_event_state(
+                source=MarketSource.POLYMARKET,
+                event_id=event_id,
+                currency=currency,
+            )
+        except Exception:
+            logger.warning(
+                "Failed touching Polymarket event state for %s",
+                event_id,
+                exc_info=True,
+            )
 
     async def _score_market(self, *, market_id: str, currency: Currency) -> None:
         market_state = await self.live_state.get_market_state(
@@ -598,7 +741,7 @@ class PolymarketWebSocketManager:
             score_result=score_result,
         )
         if snapshot_reason:
-            async with async_session_maker() as session:
+            async with bg_session_maker() as session:
                 await self.signal_snapshot_services.persist_snapshot(
                     session=session,
                     market_state=market_state,
@@ -613,7 +756,7 @@ class PolymarketWebSocketManager:
 
         if self.baseline_services is None:
             return None
-        async with async_session_maker() as session:
+        async with bg_session_maker() as session:
             baseline = await self.baseline_services.get_market_baseline(
                 session=session,
                 market_id=market_id,
@@ -629,7 +772,7 @@ class PolymarketWebSocketManager:
         if not bindings:
             return
 
-        async with async_session_maker() as session:
+        async with bg_session_maker() as session:
             tracked_markets = (
                 await session.exec(
                     select(TrackedMarket).where(

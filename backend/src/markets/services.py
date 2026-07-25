@@ -12,6 +12,7 @@ from fastapi import HTTPException, status
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from src.db.main import async_session_maker
 from src.markets.baselines import BaselineServices
 from src.markets.ai_insights import AIInsightServices
 from src.markets.live_state import (
@@ -30,7 +31,7 @@ from src.markets.models import (
     TrackedMarket,
     UserTrackedEvent,
 )
-from src.markets.scoring import ScoringServices
+from src.markets.scoring import MarketScoringInput, ScoringServices
 from src.markets.schemas import (
     DiscoveryEventRead,
     EventDetailRead,
@@ -53,7 +54,6 @@ from src.utils.polymarket import PolymarketServices
 
 
 class MarketServices:
-    DISCOVERY_LISTINGS_CACHE_TTL = 60
     TRACKER_CACHE_TTL = 45
     EVENT_DETAIL_CACHE_TTL = 15
     AI_INSIGHT_CACHE_TTL = 1800
@@ -61,8 +61,8 @@ class MarketServices:
     AI_INSIGHT_PLACEHOLDER = "AI insight is warming up."
     DISCOVERY_FEED_CACHE_TTL = 300
     DISCOVERY_FEED_BUILD_LOCK_TTL = 30
-    LIVE_STATE_MARKET_READ_CONCURRENCY = 6
-    TRACKER_EVENT_BUILD_CONCURRENCY = 3
+    LIVE_STATE_MARKET_READ_CONCURRENCY = 16
+    TRACKER_EVENT_BUILD_CONCURRENCY = 10
 
     def __init__(
         self,
@@ -172,8 +172,7 @@ class MarketServices:
         async with semaphore:
             return await awaitable
 
-    def _discovery_listings_cache_id(self, *, currency: Currency) -> str:
-        return f"discovery-listings:{currency.value}"
+
 
     def _tracker_cache_id(self, *, user_id: UUID, currency: Currency) -> str:
         return f"tracker:{user_id}:{currency.value}"
@@ -550,16 +549,99 @@ class MarketServices:
         if sell_notional is None:
             sell_notional = getattr(market, "sell_notional", None)
 
-        return EventMarketRead(
+        # --- Signal resolution strategy ---
+        # Priority 1: Use the pre-computed live_signal from Redis if it exists.
+        #   The worker scores markets with full real-time CLOB data (orderbook depth,
+        #   spread, tick-level flow) which the HTTP read path cannot replicate.
+        #   If a live_signal is present it is authoritative and fresher than anything
+        #   we can compute here.
+        # Priority 2: If live_market exists AND has real orderbook data (bid/ask depth
+        #   or meaningful notional flow), compute a fresh score.  This handles the
+        #   race-window between the WS update and the signal write.
+        # Priority 3: If neither source of live data is available the market hasn't
+        #   been touched by the worker yet (no WS subscription or first boot).
+        #   Return score=0 / classification="unscored" rather than a misleading
+        #   "floor score" derived from stale DB fields that all markets share.
+        direction_map = {
+            "UP": "RISING",
+            "DOWN": "FALLING",
+            "FLAT": "STABLE",
+            None: "STABLE",
+        }
+
+        if live_signal:
+            # Priority 1 — use worker-computed score directly
+            signal_read = SignalRead(
+                score=live_signal.score,
+                classification=live_signal.classification,
+                direction=direction_map.get(getattr(live_market, "last_direction", None), "STABLE"),
+                formula=live_signal.formula,
+                factors=live_signal.factors,
+                notes=live_signal.notes,
+                detected_at=live_signal.scored_at,
+            )
+        elif live_market and (
+            (live_market.top_bid_depth or 0) > 0
+            or (live_market.top_ask_depth or 0) > 0
+            or (live_market.buy_notional or 0) > 0
+            or (live_market.price_updates_in_window or 0) > 0
+        ):
+            # Priority 2 — live_market has real data; compute fresh score
+            scoring_input = MarketScoringInput(
+                source=market.source,
+                engine=market.engine,
+                event_id=market.event_id,
+                market_id=market.market_id,
+                current_probability=current_probability or 0.0,
+                previous_probability=previous_probability,
+                baseline_sigma=0.05,
+                event_liquidity=event_liquidity or getattr(live_market, "event_liquidity", None),
+                market_total_orders=market_total_orders,
+                event_total_orders=getattr(live_market, "event_total_orders", None),
+                price_updates_in_window=live_market.price_updates_in_window,
+                persistence_ticks=live_market.persistence_ticks,
+                top_bid_depth=live_market.top_bid_depth,
+                top_ask_depth=live_market.top_ask_depth,
+                top_5_bid_depth=live_market.top_5_bid_depth,
+                top_5_ask_depth=live_market.top_5_ask_depth,
+                spread_bps=live_market.spread_bps,
+                buy_notional=live_market.buy_notional,
+                sell_notional=live_market.sell_notional,
+                orderbook_supported=live_market.orderbook_supported,
+                ticker_supported=live_market.ticker_supported,
+                has_recent_reversal=live_market.has_recent_reversal,
+                nearing_close=live_market.nearing_close,
+            )
+            fresh = self.scoring_services.compute_signal_score(scoring_input)
+            signal_read = SignalRead(
+                score=fresh.score,
+                classification=fresh.classification,
+                direction=direction_map.get(live_market.last_direction, "STABLE"),
+                formula=fresh.formula,
+                factors=fresh.factors.model_dump(),
+                notes=fresh.notes,
+                detected_at=live_market.last_updated_at,
+            )
+        else:
+            # Priority 3 — no live data yet; show 0 / unscored to avoid misleading floor
+            signal_read = SignalRead(
+                score=0.0,
+                classification="unscored",
+                direction=direction_map.get(getattr(live_market, "last_direction", None), "STABLE"),
+                detected_at=getattr(live_market, "last_updated_at", None),
+            )
+
+        read_obj = EventMarketRead(
             market_id=market.market_id,
             market_title=market.market_title,
             market_image_url=market.market_image_url,
             market_image_128_url=market.market_image_128_url,
             rules=market.rules,
             yes_outcome_id=market.yes_outcome_id,
-            yes_outcome_label=market.yes_outcome_label,
+            yes_outcome_label=(market.yes_outcome_label or "YES").strip() or "YES",
             no_outcome_id=market.no_outcome_id,
-            no_outcome_label=market.no_outcome_label,
+            no_outcome_label=(market.no_outcome_label or "NO").strip() or "NO",
+
             current_probability=current_probability,
             inverse_probability=inverse_probability,
             market_total_orders=market_total_orders,
@@ -567,9 +649,24 @@ class MarketServices:
             sell_notional=sell_notional,
             probability_delta=probability_delta,
             event_liquidity=getattr(live_market, "event_liquidity", event_liquidity),
-            signal=self._build_signal_read(signal_state=live_signal, market_state=live_market),
+            focus_outcome_side=None,
+            focus_outcome_label=None,
+            signal=signal_read,
             last_updated=getattr(live_market, "last_updated_at", None),
         )
+
+        
+        focus_side, focus_label, _, _ = self._resolve_focus_outcome(
+            current_probability=read_obj.current_probability,
+            inverse_probability=read_obj.inverse_probability,
+            probability_delta=read_obj.probability_delta,
+            signal_direction=read_obj.signal.direction,
+            yes_outcome_label=read_obj.yes_outcome_label,
+            no_outcome_label=read_obj.no_outcome_label,
+        )
+        read_obj.focus_outcome_side = focus_side
+        read_obj.focus_outcome_label = focus_label
+        return read_obj
 
     async def _build_market_reads(
         self,
@@ -697,25 +794,23 @@ class MarketServices:
         if not market_ids:
             return {}
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
-        rows = (
-            await session.exec(
-                select(
-                    MarketSignalSnapshot.market_id,
-                    MarketSignalSnapshot.score,
-                    MarketSignalSnapshot.created_at,
-                ).where(
-                    MarketSignalSnapshot.market_id.in_(market_ids),
-                    MarketSignalSnapshot.created_at >= cutoff,
-                ).order_by(
-                    MarketSignalSnapshot.market_id,
-                    MarketSignalSnapshot.created_at.asc(),
-                )
+        statement = (
+            select(
+                MarketSignalSnapshot.market_id,
+                MarketSignalSnapshot.score,
             )
-        ).all()
-        oldest_scores: dict[str, float] = {}
-        for market_id, score, _ in rows:
-            oldest_scores.setdefault(market_id, score)
-        return oldest_scores
+            .distinct(MarketSignalSnapshot.market_id)
+            .where(
+                MarketSignalSnapshot.market_id.in_(market_ids),
+                MarketSignalSnapshot.created_at >= cutoff,
+            )
+            .order_by(
+                MarketSignalSnapshot.market_id,
+                MarketSignalSnapshot.created_at.asc(),
+            )
+        )
+        rows = (await session.exec(statement)).all()
+        return {market_id: score for market_id, score in rows}
 
     async def _attach_market_score_deltas(
         self,
@@ -736,6 +831,126 @@ class MarketServices:
             ) if market.market_id in oldest_scores else market
             for market in markets
         ]
+
+    def _clamp_percentage(self, value: float | None) -> float | None:
+        if value is None:
+            return None
+        return max(0.0, min(1.0, value))
+
+    def _build_warmup_score_history_points(
+        self,
+        *,
+        observed_rows: list[tuple[float, float | None, datetime]],
+        current_market: EventMarketRead | None,
+        current_live_probability: float | None,
+    ) -> list[ScoreHistoryPoint]:
+        if current_market is None:
+            return []
+
+        now = datetime.now(timezone.utc)
+        current_time = self._parse_datetime(current_market.last_updated) or now
+        current_score = max(0.0, min(100.0, float(current_market.signal.score or 0.0)))
+        current_probability = self._clamp_percentage(current_market.current_probability)
+        observed_points = [
+            ScoreHistoryPoint(
+                score=score,
+                current_probability=self._clamp_percentage(probability),
+                created_at=created_at,
+                estimated=False,
+            )
+            for score, probability, created_at in observed_rows
+        ]
+
+        if len(observed_points) >= 3:
+            return observed_points
+
+        if observed_points:
+            first_observed = observed_points[0]
+            anchor_score = first_observed.score
+            anchor_probability = first_observed.current_probability
+            anchor_time = first_observed.created_at
+        else:
+            score_delta_48h = current_market.score_delta_48h
+            if score_delta_48h is None or score_delta_48h == 0.0:
+                direction = (current_market.signal.direction or "STABLE").upper()
+                factors = current_market.signal.factors or {}
+                move_factor = float(factors.get("move", 0.3)) if isinstance(factors, dict) else 0.3
+                prob_delta = current_market.probability_delta or 0.0
+
+                if direction in ("RISING", "UP"):
+                    score_delta_48h = max(6.0, current_score * 0.45 * max(0.25, move_factor))
+                elif direction in ("FALLING", "DOWN"):
+                    score_delta_48h = -max(6.0, current_score * 0.45 * max(0.25, move_factor))
+                elif abs(prob_delta) > 0.001:
+                    score_delta_48h = round(prob_delta * 40.0, 2)
+                else:
+                    score_delta_48h = 0.0
+
+            anchor_score = max(0.0, min(100.0, current_score - score_delta_48h))
+            prob_delta = current_market.probability_delta or 0.0
+            raw_anchor_prob = (current_live_probability if current_live_probability is not None else current_probability)
+            anchor_probability = self._clamp_percentage(raw_anchor_prob - prob_delta) if raw_anchor_prob is not None else None
+            anchor_time = current_time - timedelta(hours=48)
+
+        midpoint_time = anchor_time + (current_time - anchor_time) / 2
+        midpoint_score = max(0.0, min(100.0, (anchor_score + current_score) / 2))
+        midpoint_probability = None
+        if anchor_probability is not None or current_probability is not None:
+            midpoint_probability = self._clamp_percentage(
+                ((anchor_probability if anchor_probability is not None else current_probability or 0.0) +
+                 (current_probability if current_probability is not None else anchor_probability or 0.0)) / 2
+            )
+
+        bridge_points: list[ScoreHistoryPoint] = []
+        if not observed_points:
+            bridge_points.append(
+                ScoreHistoryPoint(
+                    score=anchor_score,
+                    current_probability=anchor_probability,
+                    created_at=anchor_time,
+                    estimated=True,
+                )
+            )
+
+        if len(observed_points) <= 1:
+            bridge_points.append(
+                ScoreHistoryPoint(
+                    score=midpoint_score,
+                    current_probability=midpoint_probability,
+                    created_at=midpoint_time,
+                    estimated=True,
+                )
+            )
+
+        current_point = ScoreHistoryPoint(
+            score=current_score,
+            current_probability=current_probability,
+            created_at=current_time,
+            estimated=len(observed_points) == 0,
+        )
+
+        merged = [*observed_points, *bridge_points]
+        if not merged or abs((merged[-1].created_at - current_point.created_at).total_seconds()) > 60:
+            merged.append(current_point)
+        elif current_point.score != merged[-1].score or current_point.current_probability != merged[-1].current_probability:
+            merged[-1] = current_point
+
+        merged.sort(key=lambda point: point.created_at)
+
+        unique_points: list[ScoreHistoryPoint] = []
+        seen: set[tuple[str, float, float | None, bool]] = set()
+        for point in merged:
+            key = (
+                point.created_at.isoformat(),
+                round(point.score, 4),
+                round(point.current_probability, 6) if point.current_probability is not None else None,
+                point.estimated,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_points.append(point)
+        return unique_points
 
     def _format_notional_short(self, currency: Currency, amount: float | None) -> str:
         value = float(amount or 0.0)
@@ -1048,22 +1263,7 @@ class MarketServices:
             signal=SignalRead(),
         )
 
-    async def _get_cached_discovery_listings(self, *, currency: Currency) -> list[dict] | None:
-        payload = await self._safe_get_read_model(
-            namespace="discovery-listings",
-            identifier=self._discovery_listings_cache_id(currency=currency),
-        )
-        if not payload or not isinstance(payload, list):
-            return None
-        return payload
 
-    async def _set_cached_discovery_listings(self, *, currency: Currency, events: list[dict]) -> None:
-        await self._safe_set_read_model(
-            namespace="discovery-listings",
-            identifier=self._discovery_listings_cache_id(currency=currency),
-            payload=events,
-            ttl_seconds=self.DISCOVERY_LISTINGS_CACHE_TTL,
-        )
 
     async def _build_discovery_feed_fallback(
         self,
@@ -1345,10 +1545,6 @@ class MarketServices:
         include_system_tracker: bool = False,
     ) -> None:
         effective_detail_currency = detail_currency or list_currency
-        await self._safe_delete_read_model(
-            namespace="discovery-listings",
-            identifier=self._discovery_listings_cache_id(currency=list_currency),
-        )
         await self._safe_delete_read_model(
             namespace="event-detail",
             identifier=self._event_detail_cache_id(event_id=event_id, currency=effective_detail_currency),
@@ -2588,41 +2784,113 @@ class MarketServices:
         ]
 
         if not markets:
-            logger.info("Event %s not in DB yet, fetching from source %s", event_id, authoritative_source.value)
-            if authoritative_source == MarketSource.POLYMARKET:
-                if not self.polymarket:
-                    raise HTTPException(
-                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                        detail="Polymarket service unavailable",
-                    )
-                event_payload = await self.polymarket.get_event_by_id(event_id=event_id)
-                normalized = self.normalize_event_to_tracked_markets(
-                    event_payload,
-                    currency=Currency.DOLLAR,
-                    source=MarketSource.POLYMARKET,
-                )
-                if self.polymarket_clob:
-                    token_ids = []
-                    for m in normalized.markets:
-                        if m.yes_outcome_id: token_ids.append(m.yes_outcome_id)
-                        if m.no_outcome_id: token_ids.append(m.no_outcome_id)
-                    try:
-                        books = await self.polymarket_clob.get_books(token_ids)
-                        book_map = {str(b.get("asset_id")): b for b in books if b.get("asset_id")}
-                        for m in normalized.markets:
-                            yes_book = book_map.get(m.yes_outcome_id)
-                            no_book = book_map.get(m.no_outcome_id)
-                            yes_bids = (yes_book or {}).get("bids") or []
-                            yes_asks = (yes_book or {}).get("asks") or []
-                            m.buy_notional = sum(self.polymarket_clob.level_total(level) for level in yes_bids)
-                            m.sell_notional = sum(self.polymarket_clob.level_total(level) for level in yes_asks)
-                    except Exception:
-                        logger.warning("Failed to fetch Polymarket order books for event %s", event_id, exc_info=True)
+            logger.info("Event %s not in DB yet, checking discovery feed in Redis", event_id)
+            cached_feed = await self._safe_get_read_model(
+                namespace="discovery-feed",
+                identifier=currency.value,
+            )
+            disc_event = None
+            if cached_feed and isinstance(cached_feed, list):
+                for item in cached_feed:
+                    if str(item.get("event_id")) == event_id:
+                        disc_event = item
+                        break
 
-                currency = Currency.DOLLAR
-            else:
-                event_payload = await self.bayse.get_event_by_id(event_id=event_id, currency=currency)
-                normalized = self.normalize_event_to_tracked_markets(event_payload, currency=currency)
+            if disc_event:
+                highest_scoring = None
+                if disc_event.get("highest_scoring_market"):
+                    highest_scoring = HighestScoringMarketRead.model_validate(disc_event["highest_scoring_market"])
+                
+                raw_yes_label = highest_scoring.focus_outcome_label if (highest_scoring and highest_scoring.focus_outcome_label) else "YES"
+                market_read = EventMarketRead(
+                    market_id=highest_scoring.market_id if highest_scoring else event_id,
+                    market_title=highest_scoring.market_title if highest_scoring else disc_event.get("event_title", ""),
+                    yes_outcome_id=f"{event_id}:yes",
+                    yes_outcome_label=(raw_yes_label or "YES").strip() or "YES",
+                    no_outcome_id=f"{event_id}:no",
+                    no_outcome_label="NO",
+                    current_probability=highest_scoring.current_probability if highest_scoring else None,
+                    probability_delta=highest_scoring.probability_delta if highest_scoring else 0.0,
+                    buy_notional=highest_scoring.buy_notional if highest_scoring else None,
+                    sell_notional=highest_scoring.sell_notional if highest_scoring else None,
+                    signal=highest_scoring.signal if highest_scoring else SignalRead(),
+                )
+
+
+                response = EventDetailRead(
+                    event_id=disc_event.get("event_id", event_id),
+                    event_title=disc_event.get("event_title", ""),
+                    event_slug=disc_event.get("event_slug"),
+                    event_icon_url=disc_event.get("event_icon_url"),
+                    source=MarketSource(disc_event.get("source", authoritative_source.value)),
+                    currency=Currency(disc_event.get("currency", currency.value)),
+                    event_type=EventType(disc_event.get("event_type", "SINGLE_MARKET")),
+                    category=disc_event.get("category"),
+                    status=disc_event.get("status"),
+                    engine=MarketEngine(disc_event.get("engine", "CLOB")),
+                    total_liquidity=disc_event.get("total_liquidity"),
+                    event_total_orders=disc_event.get("event_total_orders"),
+                    closing_date=self._parse_datetime(disc_event.get("closing_date")),
+                    tracked_markets_count=disc_event.get("tracked_markets_count", 1),
+                    tracking_enabled=False,
+                    data_mode="lite_snapshot",
+                    last_updated=disc_event.get("last_updated"),
+                    ai_insight=disc_event.get("ai_insight", "Insight unavailable"),
+                    highest_scoring_market=highest_scoring,
+                    markets=[market_read],
+                )
+                await self._set_cached_event_detail(event_detail=response)
+                return await self._attach_ai_insight(response)
+
+            logger.info("Event %s not in discovery feed cache, fetching fallback from source %s", event_id, authoritative_source.value)
+            try:
+                if authoritative_source == MarketSource.POLYMARKET:
+                    if not self.polymarket:
+                        raise HTTPException(
+                            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="Polymarket service unavailable",
+                        )
+                    event_payload = await asyncio.wait_for(
+                        self.polymarket.get_event_by_id(event_id=event_id),
+                        timeout=3.0,
+                    )
+                    normalized = self.normalize_event_to_tracked_markets(
+                        event_payload,
+                        currency=Currency.DOLLAR,
+                        source=MarketSource.POLYMARKET,
+                    )
+                    if self.polymarket_clob:
+                        token_ids = []
+                        for m in normalized.markets:
+                            if m.yes_outcome_id: token_ids.append(m.yes_outcome_id)
+                            if m.no_outcome_id: token_ids.append(m.no_outcome_id)
+                        try:
+                            books = await self.polymarket_clob.get_books(token_ids)
+                            book_map = {str(b.get("asset_id")): b for b in books if b.get("asset_id")}
+                            for m in normalized.markets:
+                                yes_book = book_map.get(m.yes_outcome_id)
+                                no_book = book_map.get(m.no_outcome_id)
+                                yes_bids = (yes_book or {}).get("bids") or []
+                                yes_asks = (yes_book or {}).get("asks") or []
+                                m.buy_notional = sum(self.polymarket_clob.level_total(level) for level in yes_bids)
+                                m.sell_notional = sum(self.polymarket_clob.level_total(level) for level in yes_asks)
+                        except Exception:
+                            logger.warning("Failed to fetch Polymarket order books for event %s", event_id, exc_info=True)
+
+                    currency = Currency.DOLLAR
+                else:
+                    event_payload = await asyncio.wait_for(
+                        self.bayse.get_event_by_id(event_id=event_id, currency=currency),
+                        timeout=3.0,
+                    )
+                    normalized = self.normalize_event_to_tracked_markets(event_payload, currency=currency)
+            except Exception as exc:
+                logger.warning("Fallback fetch failed or timed out for event %s: %s", event_id, exc)
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Event detail not found",
+                )
+
             grouped_markets = await self._build_market_reads(
                 markets=normalized.markets,
                 currency=currency,
@@ -2653,6 +2921,8 @@ class MarketServices:
             response = await self._enrich_event_detail_analytics(session=session, event_detail=response)
             await self._set_cached_event_detail(event_detail=response)
             return await self._attach_ai_insight(response)
+
+
 
         tracking_enabled = await self._get_user_tracking_status(
             session=session,
@@ -2745,6 +3015,7 @@ class MarketServices:
                 ).order_by(MarketSignalSnapshot.created_at.asc())
             )
         ).all()
+        observed_count = len(rows)
 
         if len(rows) > 20:
             step = max(1, len(rows) // 20)
@@ -2753,17 +3024,62 @@ class MarketServices:
                 sampled_rows.append(rows[-1])
             rows = sampled_rows[:20] if len(sampled_rows) > 20 else sampled_rows
 
+        tracked_market = (
+            await session.exec(
+                select(TrackedMarket).where(
+                    TrackedMarket.event_id == event_id,
+                    TrackedMarket.market_id == resolved_market_id,
+                    TrackedMarket.source == source,
+                    TrackedMarket.tracking_enabled == True,
+                )
+            )
+        ).first()
+
+        current_market: EventMarketRead | None = None
+        current_live_probability: float | None = None
+        if tracked_market:
+            current_market = await self._build_market_read(
+                market=tracked_market,
+                currency=effective_currency,
+            )
+            current_market = (
+                await self._attach_market_score_deltas(
+                    session=session,
+                    markets=[current_market],
+                )
+            )[0]
+            if self.live_state:
+                live_market = await self.live_state.get_market_state(
+                    source=source,
+                    market_id=resolved_market_id,
+                    currency=effective_currency,
+                )
+                current_live_probability = getattr(live_market, "previous_probability", None)
+
+        points = self._build_warmup_score_history_points(
+            observed_rows=list(rows),
+            current_market=current_market,
+            current_live_probability=current_live_probability,
+        ) if observed_count < 3 else [
+            ScoreHistoryPoint(
+                score=score,
+                current_probability=current_probability,
+                created_at=created_at,
+            )
+            for score, current_probability, created_at in rows
+        ]
+
         response = ScoreHistoryRead(
             event_id=event_id,
             market_id=resolved_market_id,
-            points=[
-                ScoreHistoryPoint(
-                    score=score,
-                    current_probability=current_probability,
-                    created_at=created_at,
-                )
-                for score, current_probability, created_at in rows
-            ],
+            points=points,
+            observed_points=observed_count,
+            warmup=observed_count < 3,
+            note=(
+                "Warm-start view: Prism is blending live state with observed snapshots until enough real history accumulates."
+                if observed_count < 3
+                else None
+            ),
         )
         await self._safe_set_read_model(
             namespace="score-history",
@@ -2772,6 +3088,120 @@ class MarketServices:
             ttl_seconds=300,
         )
         return response
+
+    async def get_bulk_score_history(
+        self,
+        *,
+        event_ids: list[str],
+        source: MarketSource = MarketSource.BAYSE,
+        currency: Currency = Currency.DOLLAR,
+        hours: int = 48,
+    ) -> dict[str, ScoreHistoryRead]:
+        if not event_ids:
+            return {}
+
+        effective_currency = Currency.DOLLAR if source == MarketSource.POLYMARKET else currency
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+        cached_results: dict[str, ScoreHistoryRead] = {}
+        missing_event_ids: list[str] = []
+
+        for eid in event_ids:
+            cache_id = self._score_history_cache_id(
+                event_id=eid,
+                market_id="top",
+                hours=hours,
+            )
+            cached = await self._safe_get_read_model(
+                namespace="score-history",
+                identifier=cache_id,
+            )
+            if cached and isinstance(cached, dict):
+                try:
+                    cached_results[eid] = ScoreHistoryRead.model_validate(cached)
+                    continue
+                except Exception:
+                    pass
+            missing_event_ids.append(eid)
+
+        if not missing_event_ids:
+            return cached_results
+
+        async with async_session_maker() as session:
+            statement = (
+                select(
+                    MarketSignalSnapshot.event_id,
+                    MarketSignalSnapshot.market_id,
+                    MarketSignalSnapshot.score,
+                    MarketSignalSnapshot.current_probability,
+                    MarketSignalSnapshot.created_at,
+                )
+                .where(
+                    MarketSignalSnapshot.event_id.in_(missing_event_ids),
+                    MarketSignalSnapshot.created_at >= cutoff,
+                )
+                .order_by(
+                    MarketSignalSnapshot.event_id,
+                    MarketSignalSnapshot.created_at.asc(),
+                )
+            )
+            rows = (await session.exec(statement)).all()
+
+        rows_by_event: dict[str, list[tuple[float, float | None, datetime]]] = defaultdict(list)
+        market_ids_by_event: dict[str, str] = {}
+        for row in rows:
+            rows_by_event[row.event_id].append((row.score, row.current_probability, row.created_at))
+            if row.event_id not in market_ids_by_event:
+                market_ids_by_event[row.event_id] = row.market_id
+
+        for eid in missing_event_ids:
+            event_rows = rows_by_event.get(eid, [])
+            resolved_market_id = market_ids_by_event.get(eid, eid)
+            observed_count = len(event_rows)
+
+            if len(event_rows) > 20:
+                step = max(1, len(event_rows) // 20)
+                sampled = event_rows[::step]
+                if sampled[-1] != event_rows[-1]:
+                    sampled.append(event_rows[-1])
+                event_rows = sampled[:20]
+
+            points = [
+                ScoreHistoryPoint(
+                    score=score,
+                    current_probability=current_prob,
+                    created_at=created_at,
+                )
+                for score, current_prob, created_at in event_rows
+            ]
+
+            response = ScoreHistoryRead(
+                event_id=eid,
+                market_id=resolved_market_id,
+                points=points,
+                observed_points=observed_count,
+                warmup=observed_count < 3,
+                note=(
+                    "Warm-start view: Prism is blending live state with observed snapshots until enough real history accumulates."
+                    if observed_count < 3
+                    else None
+                ),
+            )
+            cached_results[eid] = response
+
+            cache_id = self._score_history_cache_id(
+                event_id=eid,
+                market_id="top",
+                hours=hours,
+            )
+            await self._safe_set_read_model(
+                namespace="score-history",
+                identifier=cache_id,
+                payload=response.model_dump(mode="json"),
+                ttl_seconds=300,
+            )
+
+        return cached_results
 
     async def get_discovery_feed_for_user(
         self,
@@ -2795,37 +3225,23 @@ class MarketServices:
 
         if cached is None or not isinstance(cached, list):
             logger.warning(
-                "Discovery feed cache unavailable for %s; building fallback response",
+                "Discovery feed cache unavailable for %s; building live fallback feed",
                 currency.value,
             )
-            build_locally = True
-            if self.live_state:
-                lock_acquired = await self._safe_acquire_coordination_lock(
-                    namespace="discovery-feed-build",
+            fallback_items = await self._build_discovery_feed_fallback(
+                session=session,
+                user_id=user_id,
+                source=source,
+                currency=currency,
+            )
+            cached = [item.model_dump(mode="json") for item in fallback_items]
+            if cached and self.live_state:
+                await self._safe_set_read_model(
+                    namespace="discovery-feed",
                     identifier=currency.value,
-                    ttl_seconds=self.DISCOVERY_FEED_BUILD_LOCK_TTL,
+                    payload=cached,
+                    ttl_seconds=86400,
                 )
-                if not lock_acquired:
-                    warmed_cache = await self._wait_for_discovery_cache_fill(currency=currency)
-                    if warmed_cache is not None:
-                        cached = warmed_cache
-                        build_locally = False
-
-            if build_locally:
-                fallback_cards = await self._build_discovery_feed_fallback(
-                    session=session,
-                    user_id=user_id,
-                    source=source,
-                    currency=currency,
-                )
-                cached = [item.model_dump(mode="json") for item in fallback_cards]
-                if self.live_state:
-                    await self._safe_set_read_model(
-                        namespace="discovery-feed",
-                        identifier=currency.value,
-                        payload=cached,
-                        ttl_seconds=self.DISCOVERY_FEED_CACHE_TTL,
-                    )
 
         filtered_cached = [
             item
@@ -2945,37 +3361,22 @@ class MarketServices:
 
         if cached is None or not isinstance(cached, list):
             logger.warning(
-                "Admin discovery feed cache unavailable for %s; building fallback response",
+                "Admin discovery feed cache unavailable for %s; building live fallback feed",
                 currency.value,
             )
-            build_locally = True
-            if self.live_state:
-                lock_acquired = await self._safe_acquire_coordination_lock(
-                    namespace="discovery-feed-build",
+            fallback_items = await self._build_discovery_feed_fallback(
+                session=session,
+                source=source,
+                currency=currency,
+            )
+            cached = [item.model_dump(mode="json") for item in fallback_items]
+            if cached and self.live_state:
+                await self._safe_set_read_model(
+                    namespace="discovery-feed",
                     identifier=currency.value,
-                    ttl_seconds=self.DISCOVERY_FEED_BUILD_LOCK_TTL,
+                    payload=cached,
+                    ttl_seconds=86400,
                 )
-                if not lock_acquired:
-                    warmed_cache = await self._wait_for_discovery_cache_fill(currency=currency)
-                    if warmed_cache is not None:
-                        cached = warmed_cache
-                        build_locally = False
-
-            if build_locally:
-                fallback_cards = await self._build_discovery_feed_fallback(
-                    session=session,
-                    user_id=None,
-                    source=source,
-                    currency=currency,
-                )
-                cached = [item.model_dump(mode="json") for item in fallback_cards]
-                if self.live_state:
-                    await self._safe_set_read_model(
-                        namespace="discovery-feed",
-                        identifier=currency.value,
-                        payload=cached,
-                        ttl_seconds=self.DISCOVERY_FEED_CACHE_TTL,
-                    )
 
         # One fast DB query for system-tracked event IDs
         system_result = await session.exec(
@@ -3027,3 +3428,183 @@ class MarketServices:
             discovery = discovery[start:end]
         logger.info("System discovery feed contains %s events", total_count)
         return discovery, total_count
+
+    async def refresh_event_market_data(
+        self,
+        *,
+        session: AsyncSession,
+        event_id: str,
+        source: MarketSource,
+        currency: Currency,
+    ) -> dict:
+        """
+        Force-refresh live market data for a single event by pulling directly from
+        the Polymarket CLOB REST API (not the WebSocket), updating Redis live state,
+        re-scoring every market, and clearing the event detail cache so the next
+        GET /events/{event_id} returns the freshest possible data.
+
+        This is the on-demand equivalent of _resync_tracked_markets_from_rest scoped
+        to one event.  It is safe to call from the HTTP process because it only reads
+        from the CLOB API and writes to Redis; it does not touch the WebSocket.
+        """
+        if source != MarketSource.POLYMARKET or not self.polymarket_clob or not self.live_state:
+            # Bayse markets update via WebSocket; no manual refresh available.
+            return {"refreshed": 0, "note": "Manual refresh is only available for Polymarket markets."}
+
+        tracked_markets = (
+            await session.exec(
+                select(TrackedMarket).where(
+                    TrackedMarket.source == MarketSource.POLYMARKET,
+                    TrackedMarket.event_id == event_id,
+                )
+            )
+        ).all()
+
+        if not tracked_markets and self.polymarket:
+            try:
+                event_payload = await self.polymarket.get_event_by_id(event_id=event_id)
+                normalized = self.normalize_event_to_tracked_markets(
+                    event_payload,
+                    currency=Currency.DOLLAR,
+                    source=MarketSource.POLYMARKET,
+                )
+                tracked_markets = normalized.markets
+            except Exception:
+                logger.warning("Fallback event fetch failed during refresh for event %s", event_id, exc_info=True)
+
+        if not tracked_markets:
+            return {"refreshed": 0, "note": "No markets found for this event."}
+
+        # Build the asset_id → market mapping for the YES side (prices are on YES tokens)
+        yes_asset_ids = {m.yes_outcome_id: m for m in tracked_markets}
+        no_asset_ids = {m.no_outcome_id: m for m in tracked_markets}
+        all_asset_ids = list(yes_asset_ids.keys()) + list(no_asset_ids.keys())
+
+        # Pull fresh orderbooks from CLOB REST
+        try:
+            books = await self.polymarket_clob.get_books(all_asset_ids)
+        except Exception:
+            logger.warning("Failed to fetch CLOB books for event %s during refresh", event_id, exc_info=True)
+            books = []
+
+        book_map: dict[str, dict] = {str(b.get("asset_id")): b for b in books if b.get("asset_id")}
+
+        # Optionally fetch live volume for the event
+        live_volume: int | None = None
+        if self.polymarket_data:
+            try:
+                raw_volume = await self.polymarket_data.get_live_volume(event_id)
+                live_volume = int(raw_volume) if raw_volume is not None else None
+            except Exception:
+                logger.warning("Failed to fetch live volume for event %s during refresh", event_id, exc_info=True)
+
+        # Fetch event metric for liquidity
+        event_metric = (
+            await session.exec(
+                select(TrackedEventMetric).where(
+                    TrackedEventMetric.source == MarketSource.POLYMARKET,
+                    TrackedEventMetric.event_id == event_id,
+                )
+            )
+        ).first()
+
+        if tracked_markets:
+            first_market = tracked_markets[0]
+            await self.live_state.warm_event_state_from_tracking(
+                tracked_market=first_market,
+                currency=currency,
+                total_liquidity=event_metric.total_liquidity if event_metric else None,
+                tracked_markets_count=len(tracked_markets),
+            )
+            await self.live_state.update_event_state(
+                source=MarketSource.POLYMARKET,
+                event_id=event_id,
+                currency=currency,
+                event_total_orders=live_volume if live_volume is not None else first_market.event_total_orders,
+            )
+
+        refreshed = 0
+        for market in tracked_markets:
+            try:
+                yes_book = book_map.get(market.yes_outcome_id)
+                no_book = book_map.get(market.no_outcome_id)
+                yes_bids = (yes_book or {}).get("bids") or []
+                yes_asks = (yes_book or {}).get("asks") or []
+
+                current_probability = self.polymarket_clob.midpoint_from_book(yes_book)
+                inverse_probability = self.polymarket_clob.midpoint_from_book(no_book)
+                if current_probability is None and inverse_probability is not None:
+                    current_probability = 1 - inverse_probability
+                if inverse_probability is None and current_probability is not None:
+                    inverse_probability = 1 - current_probability
+
+                # Warm market state if it doesn't exist yet
+                await self.live_state.warm_market_state_from_tracking(
+                    tracked_market=market,
+                    currency=currency,
+                    total_liquidity=event_metric.total_liquidity if event_metric else None,
+                )
+
+                await self.live_state.update_market_state(
+                    source=MarketSource.POLYMARKET,
+                    market_id=market.market_id,
+                    currency=currency,
+                    current_probability=current_probability,
+                    inverse_probability=inverse_probability,
+                    event_liquidity=event_metric.total_liquidity if event_metric else None,
+                    market_total_orders=market.market_total_orders,
+                    event_total_orders=live_volume if live_volume is not None else market.event_total_orders,
+                    top_bid_depth=self.polymarket_clob.level_total(yes_bids[0]) if yes_bids else 0.0,
+                    top_ask_depth=self.polymarket_clob.level_total(yes_asks[0]) if yes_asks else 0.0,
+                    top_5_bid_depth=sum(self.polymarket_clob.level_total(lvl) for lvl in yes_bids[:5]),
+                    top_5_ask_depth=sum(self.polymarket_clob.level_total(lvl) for lvl in yes_asks[:5]),
+                    buy_notional=sum(self.polymarket_clob.level_total(lvl) for lvl in yes_bids),
+                    sell_notional=sum(self.polymarket_clob.level_total(lvl) for lvl in yes_asks),
+                    spread_bps=self.polymarket_clob.spread_bps_from_book(yes_book),
+                    orderbook_supported=True,
+                    ticker_supported=True,
+                )
+
+                # Re-score the market with the fresh data
+                market_state = await self.live_state.get_market_state(
+                    source=MarketSource.POLYMARKET,
+                    market_id=market.market_id,
+                    currency=currency,
+                )
+                if market_state and self.scoring_services:
+                    scoring_input = self.live_state.build_scoring_input(market_state=market_state)
+                    score_result = self.scoring_services.compute_signal_score(scoring_input)
+                    await self.live_state.set_signal_state(
+                        self.live_state.build_signal_state(
+                            market_state=market_state,
+                            score_result=score_result,
+                        )
+                    )
+
+                await self._safe_delete_read_model(
+                    namespace="score-history",
+                    identifier=self._score_history_cache_id(event_id=event_id, market_id=market.market_id, hours=48),
+                )
+
+                refreshed += 1
+            except Exception:
+                logger.warning(
+                    "Failed to refresh market %s for event %s",
+                    market.market_id,
+                    event_id,
+                    exc_info=True,
+                )
+
+        # Invalidate the event detail cache so the next read is fully fresh
+        await self._safe_delete_read_model(
+            namespace="event-detail",
+            identifier=self._event_detail_cache_id(event_id=event_id, currency=currency),
+        )
+
+        logger.info(
+            "Manual refresh complete for event %s: %s/%s markets updated",
+            event_id,
+            refreshed,
+            len(tracked_markets),
+        )
+        return {"refreshed": refreshed, "total": len(tracked_markets)}

@@ -1,5 +1,5 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
 import gsap from 'gsap';
 
 import { marketsApi } from '../../lib/api/markets';
@@ -8,14 +8,17 @@ import type { DiscoveryCardViewModel } from '../../lib/api/types';
 import { DEFAULT_PAGE_SIZE } from '../../lib/constants';
 import { SignalCard } from '../../components/ui/SignalCard';
 import { useInfiniteScrollSentinel } from '../../hooks/useInfiniteScrollSentinel';
+import { useRealtimeStream } from '../../hooks/useRealtimeStream';
 
 export function TrackerPage() {
+  useRealtimeStream();
   const container = useRef<HTMLDivElement>(null);
+
   const hasAnimatedRef = useRef(false);
   const previousEventIdsRef = useRef<string[]>([]);
   const queryClient = useQueryClient();
   const [tracked, setTracked] = useState<Record<string, boolean>>({});
-  const [syncTimer, setSyncTimer] = useState(12);
+  const [syncTimer, setSyncTimer] = useState(0);
   const trackerQuery = useInfiniteQuery({
     queryKey: ['tracker-feed', DEFAULT_PAGE_SIZE],
     queryFn: ({ pageParam }) => {
@@ -39,6 +42,28 @@ export function TrackerPage() {
     () => trackerQuery.data?.pages.flatMap((page) => page.items.map(mapDiscoveryEvent)) || [],
     [trackerQuery.data],
   );
+
+  const eventIds = useMemo(() => events.map((e) => e.id), [events]);
+  useQuery({
+    queryKey: ['bulk-score-history', 'tracker', eventIds.join(',')],
+    queryFn: async () => {
+      const data = await marketsApi.getBulkScoreHistory(eventIds, 48);
+      for (const event of events) {
+        const history = data[event.id];
+        if (history) {
+          const topMarket = event.highestScoringMarket;
+          queryClient.setQueryData(
+            ['score-history', event.id, topMarket?.marketId, 48, event.source.toLowerCase()],
+            history,
+          );
+        }
+      }
+      return data;
+    },
+    enabled: eventIds.length > 0,
+    staleTime: 5 * 60 * 1000,
+    gcTime: 10 * 60 * 1000,
+  });
 
   const loadMoreRef = useInfiniteScrollSentinel({
     hasNextPage: !!trackerQuery.hasNextPage,
@@ -64,11 +89,14 @@ export function TrackerPage() {
 
   useEffect(() => {
     const interval = setInterval(() => {
-      setSyncTimer((prev) => (prev >= 30 ? 0 : prev + 1));
+      if (trackerQuery.dataUpdatedAt) {
+        const elapsed = Math.round((Date.now() - trackerQuery.dataUpdatedAt) / 1000);
+        setSyncTimer(Math.max(0, elapsed));
+      }
     }, 1000);
 
     return () => clearInterval(interval);
-  }, []);
+  }, [trackerQuery.dataUpdatedAt]);
 
   useLayoutEffect(() => {
     if (events.length === 0) return;
@@ -177,9 +205,9 @@ export function TrackerPage() {
           />
         ))}
 
-        {!trackerQuery.isLoading && events.map((event) => (
+        {!trackerQuery.isLoading && events.map((event, index) => (
           <div key={event.id} className="event-card-wrapper h-full" data-event-id={event.id}>
-            <SignalCard event={event} onTrack={toggleTrack} isTracked={!!tracked[event.id]} origin="tracker" />
+            <SignalCard event={event} onTrack={toggleTrack} isTracked={!!tracked[event.id]} origin="tracker" index={index} />
           </div>
         ))}
 

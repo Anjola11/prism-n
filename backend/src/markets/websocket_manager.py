@@ -9,7 +9,7 @@ from sqlalchemy import false, or_
 from sqlmodel import select
 from websockets.asyncio.client import ClientConnection
 
-from src.db.main import async_session_maker
+from src.db.main import bg_session_maker
 from src.markets.baselines import BaselineServices
 from src.markets.live_state import (
     BayseSubscriptionPlan,
@@ -227,7 +227,7 @@ class BayseWebSocketManager:
         return plan
 
     async def _build_subscription_plan_from_db(self) -> BayseSubscriptionPlan:
-        async with async_session_maker() as session:
+        async with bg_session_maker() as session:
             tracked_event_ids = set(
                 await session.exec(
                     select(UserTrackedEvent.event_id).where(UserTrackedEvent.tracking_enabled == True)
@@ -403,6 +403,7 @@ class BayseWebSocketManager:
         if message_type in {"buy_order", "sell_order"}:
             await self._handle_activity_update(message)
             return
+
         if message_type == "orderbook_update":
             await self._handle_orderbook_update(message)
             return
@@ -471,16 +472,15 @@ class BayseWebSocketManager:
 
     async def _handle_activity_update(self, message: dict[str, Any]) -> None:
         payload = message.get("data") or {}
-        order = payload.get("order") or {}
         market = payload.get("market") or {}
         event = payload.get("event") or {}
+        order = payload.get("order") or {}
 
         event_id = str(event.get("id") or payload.get("eventId") or "")
         market_id = str(market.get("id") or payload.get("marketId") or "")
         if not market_id:
             return
 
-        side = "BUY" if message.get("type") == "buy_order" else "SELL"
         order_currency = self._safe_currency(order.get("currency") or payload.get("currency"))
         if order_currency:
             currencies = [order_currency]
@@ -489,25 +489,7 @@ class BayseWebSocketManager:
         else:
             currencies = [Currency.DOLLAR]
 
-        amount = order.get("amount")
-        quantity = order.get("quantity")
-        price = order.get("price")
-        notional = self._to_float(amount)
-        if notional is None and quantity is not None and price is not None:
-            quantity_value = self._to_float(quantity)
-            price_value = self._to_float(price)
-            if quantity_value is not None and price_value is not None:
-                notional = quantity_value * price_value
-        notional = notional or 0.0
-
         for currency in currencies:
-            await self.live_state.increment_trade_flow(
-                source=MarketSource.BAYSE,
-                market_id=market_id,
-                currency=currency,
-                side=side,
-                notional=notional,
-            )
             await self._score_market(market_id=market_id, currency=currency)
 
     async def _handle_orderbook_update(self, message: dict[str, Any]) -> None:
@@ -533,6 +515,8 @@ class BayseWebSocketManager:
             top_ask_depth=self._extract_level_total(asks[0]) if asks else 0.0,
             top_5_bid_depth=sum(self._extract_level_total(level) for level in bids[:5]),
             top_5_ask_depth=sum(self._extract_level_total(level) for level in asks[:5]),
+            buy_notional=sum(self._extract_level_total(level) for level in bids),
+            sell_notional=sum(self._extract_level_total(level) for level in asks),
             spread_bps=spread_bps,
             orderbook_supported=True,
         )
@@ -626,7 +610,7 @@ class BayseWebSocketManager:
             score_result=score_result,
         )
         if snapshot_reason:
-            async with async_session_maker() as session:
+            async with bg_session_maker() as session:
                 await self.signal_snapshot_services.persist_snapshot(
                     session=session,
                     market_state=market_state,
@@ -639,7 +623,7 @@ class BayseWebSocketManager:
         if cache_key in self._baseline_cache:
             return self._baseline_cache[cache_key]
 
-        async with async_session_maker() as session:
+        async with bg_session_maker() as session:
             baseline = await self.baseline_services.get_market_baseline(
                 session=session,
                 market_id=market_id,
@@ -649,7 +633,7 @@ class BayseWebSocketManager:
         return sigma
 
     async def _get_event_currencies(self, event_id: str) -> list[Currency]:
-        async with async_session_maker() as session:
+        async with bg_session_maker() as session:
             result = await session.exec(
                 select(TrackedEventMetric.currency).where(
                     TrackedEventMetric.source == MarketSource.BAYSE,
@@ -676,7 +660,7 @@ class BayseWebSocketManager:
             )
 
     async def _resync_tracked_events_from_rest(self) -> None:
-        async with async_session_maker() as session:
+        async with bg_session_maker() as session:
             tracked_event_ids = set(
                 await session.exec(
                     select(UserTrackedEvent.event_id).where(UserTrackedEvent.tracking_enabled == True)

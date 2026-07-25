@@ -3,7 +3,7 @@ import asyncio
 from sqlalchemy import false, or_
 from sqlmodel import select
 
-from src.db.main import async_session_maker
+from src.db.main import bg_session_maker
 from src.markets.baselines import BaselineServices
 from src.markets.models import MarketSource, TrackedMarket, UserTrackedEvent
 from src.utils.logger import logger
@@ -63,7 +63,7 @@ class BaselineRefreshScheduler:
             await asyncio.sleep(self.interval_seconds)
 
     async def refresh_all_tracked_events(self) -> int:
-        async with async_session_maker() as session:
+        async with bg_session_maker() as session:
             tracked_event_ids = set(
                 await session.exec(
                     select(UserTrackedEvent.event_id).where(UserTrackedEvent.tracking_enabled == True)
@@ -88,28 +88,18 @@ class BaselineRefreshScheduler:
                 )
             ).all()
 
-            refreshed = 0
-            for event_id, source in tracked_market_rows:
-                try:
+        refreshed = 0
+        for event_id, source in tracked_market_rows:
+            try:
+                async with bg_session_maker() as session:
                     await self.baseline_services.refresh_event_baselines(
                         session=session,
                         event_id=event_id,
                         source=source if isinstance(source, MarketSource) else MarketSource(str(source)),
                     )
-                    refreshed += 1
-                except Exception:
-                    # If any statement fails, Postgres marks the whole transaction as aborted.
-                    # We must rollback before issuing further commands on this session.
-                    try:
-                        await session.rollback()
-                    except Exception:
-                        logger.warning(
-                            "Rollback failed after baseline refresh error for event %s source %s",
-                            event_id,
-                            source,
-                            exc_info=True,
-                        )
-                    logger.warning("Failed refreshing baselines for event %s source %s", event_id, source, exc_info=True)
-            if refreshed:
-                logger.info("Refreshed baselines for %s tracked events", refreshed)
-            return refreshed
+                refreshed += 1
+            except Exception:
+                logger.warning("Failed refreshing baselines for event %s source %s", event_id, source, exc_info=True)
+        if refreshed:
+            logger.info("Refreshed baselines for %s tracked events", refreshed)
+        return refreshed

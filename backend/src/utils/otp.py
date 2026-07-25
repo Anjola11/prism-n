@@ -1,5 +1,8 @@
-import random
+import secrets
+import string
 
-def generate_otp() -> str:
-    # Generates a random 6-digit number as a string
-    return str(random.randint(100000, 999999))
+def generate_otp(length: int = 6) -> str:
+    
+    # Generate cryptographically secure random digits
+    otp = "".join(secrets.choice(string.digits) for _ in range(length))
+    return otp

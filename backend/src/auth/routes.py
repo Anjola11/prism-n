@@ -130,6 +130,15 @@ async def renew_access_token(
     refresh_token: str | None = Cookie(default=None)
 ):
     logger.info("Renew access token request received.")
+    if not refresh_token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            refresh_token = auth_header.split(" ")[1]
+    if not refresh_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token missing"
+        )
     result = await auth_services.renew_access_token(refresh_token, session, response, request)
     logger.info("Access token effectively renewed.")
     return success_response(

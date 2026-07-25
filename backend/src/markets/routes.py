@@ -1,16 +1,18 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Request, status
+from fastapi import APIRouter, Depends, Query, Request, WebSocket, WebSocketDisconnect, status
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from src.db.main import get_session
+from src.db.redis import redis_client
 from src.markets.models import Currency, MarketSource
-from src.markets.schemas import SuccessResponse
+from src.markets.schemas import BulkScoreHistoryRequest, SuccessResponse
 from src.markets.services import MarketServices
 from src.utils.bayse import BayseServices
 from src.utils.dependencies import get_verified_user_id
 from src.utils.logger import logger
 from src.utils.responses import success_response
+
 
 
 markets_router = APIRouter()
@@ -145,6 +147,54 @@ async def get_event_detail(
 
 
 @markets_router.get(
+    "/events/score-history/bulk",
+    response_model=SuccessResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def get_bulk_score_history_get(
+    ids: str = Query(..., description="Comma-separated event IDs"),
+    source: MarketSource = MarketSource.BAYSE,
+    currency: Currency = Currency.DOLLAR,
+    hours: int = Query(default=48, ge=1, le=168),
+    market_services: MarketServices = Depends(get_market_services),
+    user_id: UUID = Depends(get_verified_user_id),
+):
+    event_ids = [e.strip() for e in ids.split(",") if e.strip()]
+    result = await market_services.get_bulk_score_history(
+        event_ids=event_ids,
+        source=source,
+        currency=currency,
+        hours=hours,
+    )
+    return success_response(
+        message="Bulk score histories fetched successfully",
+        data={eid: res.model_dump(mode="json") for eid, res in result.items()},
+    )
+
+
+@markets_router.post(
+    "/events/score-history/bulk",
+    response_model=SuccessResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def get_bulk_score_history_post(
+    body: BulkScoreHistoryRequest,
+    market_services: MarketServices = Depends(get_market_services),
+    user_id: UUID = Depends(get_verified_user_id),
+):
+    result = await market_services.get_bulk_score_history(
+        event_ids=body.event_ids,
+        source=body.source,
+        currency=body.currency,
+        hours=body.hours,
+    )
+    return success_response(
+        message="Bulk score histories fetched successfully",
+        data={eid: res.model_dump(mode="json") for eid, res in result.items()},
+    )
+
+
+@markets_router.get(
     "/events/{event_id}/score-history",
     response_model=SuccessResponse,
     status_code=status.HTTP_200_OK,
@@ -207,6 +257,39 @@ async def untrack_event(
     )
 
 
+@markets_router.post(
+    "/events/{event_id}/refresh",
+    response_model=SuccessResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def refresh_event_data(
+    event_id: str,
+    source: MarketSource = MarketSource.POLYMARKET,
+    currency: Currency = Currency.DOLLAR,
+    session: AsyncSession = Depends(get_session),
+    market_services: MarketServices = Depends(get_market_services),
+    user_id: UUID = Depends(get_verified_user_id),
+):
+    """Force-refresh live market data for a single event from the Polymarket CLOB REST API."""
+    logger.info(
+        "Manual refresh route called for user %s and event %s source=%s currency=%s",
+        user_id,
+        event_id,
+        source.value,
+        currency.value,
+    )
+    result = await market_services.refresh_event_market_data(
+        session=session,
+        event_id=event_id,
+        source=source,
+        currency=currency,
+    )
+    return success_response(
+        message="Event market data refreshed successfully",
+        data=result,
+    )
+
+
 @markets_router.get(
     "/tracker",
     response_model=SuccessResponse,
@@ -237,3 +320,27 @@ async def list_tracked_events(
             total=total_count,
         ),
     )
+
+
+@markets_router.websocket("/ws/events")
+async def websocket_stream_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    pubsub = redis_client.pubsub()
+    await pubsub.subscribe("prism:events:stream")
+    try:
+        async for message in pubsub.listen():
+            if message and message.get("type") == "message":
+                data = message.get("data")
+                if data:
+                    await websocket.send_text(data)
+    except WebSocketDisconnect:
+        logger.info("WebSocket client disconnected from stream")
+    except Exception as e:
+        logger.warning("WebSocket error: %s", e)
+    finally:
+        try:
+            await pubsub.unsubscribe("prism:events:stream")
+            await pubsub.close()
+        except Exception:
+            pass
+

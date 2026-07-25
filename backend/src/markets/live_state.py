@@ -68,6 +68,7 @@ class SignalLiveState(BaseModel):
     currency: Currency
     score: float
     classification: str
+    direction: str = "STABLE"
     formula: str
     factors: dict
     notes: list[str] = Field(default_factory=list)
@@ -182,6 +183,7 @@ class LiveStateServices:
             namespace="subscription-plan",
             identifier=identifier,
             payload=serialized,
+            ttl_seconds=259200,
         )
 
     async def get_subscription_plan(self, *, identifier: str):
@@ -207,8 +209,22 @@ class LiveStateServices:
             self.redis.set(
                 self.asset_mapping_key(source=state.source, asset_id=state.asset_id),
                 state.model_dump_json(),
+                ex=259200,
             )
         )
+
+    async def set_asset_mappings_bulk(self, states: list[AssetMappingLiveState]) -> None:
+        if not states or not self.redis:
+            return
+        pipe = self.redis.pipeline()
+        for state in states:
+            pipe.set(
+                self.asset_mapping_key(source=state.source, asset_id=state.asset_id),
+                state.model_dump_json(),
+                ex=259200,
+            )
+        await self._execute_redis(pipe.execute())
+
 
     async def get_asset_mapping(
         self,
@@ -228,6 +244,7 @@ class LiveStateServices:
             self.redis.set(
                 self.event_key(source=state.source, event_id=state.event_id, currency=state.currency),
                 state.model_dump_json(),
+                ex=259200,
             )
         )
 
@@ -264,11 +281,14 @@ class LiveStateServices:
         await self.set_event_state(updated)
         return updated
 
+    PUBSUB_CHANNEL = "prism:events:stream"
+
     async def set_market_state(self, state: MarketLiveState) -> None:
         await self._execute_redis(
             self.redis.set(
                 self.market_key(source=state.source, market_id=state.market_id, currency=state.currency),
                 state.model_dump_json(),
+                ex=259200,
             )
         )
 
@@ -319,58 +339,54 @@ class LiveStateServices:
         data["last_updated_at"] = utc_now_iso()
         updated = MarketLiveState(**data)
         await self.set_market_state(updated)
-        await self._execute_redis(
-            self.redis.set(
-                self.persistence_key(source=source, market_id=market_id, currency=currency),
-                json.dumps(
-                    {
-                        "ticks": updated.persistence_ticks,
-                        "last_direction": updated.last_direction,
-                        "has_recent_reversal": updated.has_recent_reversal,
-                        "updated_at": updated.last_updated_at,
-                    }
-                ),
+
+        try:
+            await self._execute_redis(
+                self.redis.publish(
+                    self.PUBSUB_CHANNEL,
+                    json.dumps({
+                        "type": "market_update",
+                        "event_id": updated.event_id,
+                        "market_id": updated.market_id,
+                        "source": updated.source.value if hasattr(updated.source, "value") else str(updated.source),
+                        "current_probability": updated.current_probability,
+                        "previous_probability": updated.previous_probability,
+                        "total_liquidity": updated.event_liquidity,
+                        "timestamp": updated.last_updated_at,
+                    })
+                )
             )
-        )
+        except Exception:
+            pass
+
         return updated
-
-    async def increment_trade_flow(
-        self,
-        *,
-        source: MarketSource,
-        market_id: str,
-        currency: Currency,
-        side: str,
-        notional: float,
-    ) -> MarketLiveState | None:
-        current = await self.get_market_state(source=source, market_id=market_id, currency=currency)
-        if current is None:
-            return None
-
-        side_normalized = side.upper()
-        updates: dict = {}
-        if side_normalized == "BUY":
-            updates["buy_notional"] = current.buy_notional + notional
-        elif side_normalized == "SELL":
-            updates["sell_notional"] = current.sell_notional + notional
-        else:
-            logger.warning("Unsupported trade side %s for market %s", side, market_id)
-            return current
-
-        return await self.update_market_state(
-            source=source,
-            market_id=market_id,
-            currency=currency,
-            **updates,
-        )
 
     async def set_signal_state(self, state: SignalLiveState) -> None:
         await self._execute_redis(
             self.redis.set(
                 self.signal_key(source=state.source, market_id=state.market_id, currency=state.currency),
                 state.model_dump_json(),
+                ex=259200,
             )
         )
+        try:
+            await self._execute_redis(
+                self.redis.publish(
+                    self.PUBSUB_CHANNEL,
+                    json.dumps({
+                        "type": "signal_update",
+                        "event_id": state.event_id,
+                        "market_id": state.market_id,
+                        "source": state.source.value if hasattr(state.source, "value") else str(state.source),
+                        "score": state.score,
+                        "classification": state.classification,
+                        "direction": state.direction,
+                        "timestamp": state.scored_at,
+                    })
+                )
+            )
+        except Exception:
+            pass
 
     async def get_signal_state(
         self,
@@ -396,8 +412,27 @@ class LiveStateServices:
                     market_id=state.market_id,
                 ),
                 state.model_dump_json(),
+                ex=259200,
             )
         )
+
+    async def set_subscription_states_bulk(self, states: list[SubscriptionLiveState]) -> None:
+        if not states or not self.redis:
+            return
+        pipe = self.redis.pipeline()
+        for state in states:
+            pipe.set(
+                self.subscription_key(
+                    source=state.source,
+                    channel=state.channel,
+                    event_id=state.event_id,
+                    market_id=state.market_id,
+                ),
+                state.model_dump_json(),
+                ex=259200,
+            )
+        await self._execute_redis(pipe.execute())
+
 
     async def get_subscription_state(
         self,
@@ -436,7 +471,7 @@ class LiveStateServices:
             engine=tracked_market.engine,
             market_title=tracked_market.market_title,
             current_probability=tracked_market.current_probability,
-            previous_probability=None,
+            previous_probability=tracked_market.current_probability,
             inverse_probability=tracked_market.inverse_probability,
             event_liquidity=total_liquidity,
             market_total_orders=tracked_market.market_total_orders,
@@ -526,6 +561,12 @@ class LiveStateServices:
         market_state: MarketLiveState,
         score_result: MarketScoreResult,
     ) -> SignalLiveState:
+        direction = market_state.last_direction or "FLAT"
+        direction = {
+            "UP": "RISING",
+            "DOWN": "FALLING",
+            "FLAT": "STABLE",
+        }.get(direction, direction)
         return SignalLiveState(
             source=market_state.source,
             event_id=market_state.event_id,
@@ -533,6 +574,7 @@ class LiveStateServices:
             currency=market_state.currency,
             score=score_result.score,
             classification=score_result.classification,
+            direction=direction,
             formula=score_result.formula,
             factors=score_result.factors.model_dump(),
             notes=score_result.notes,

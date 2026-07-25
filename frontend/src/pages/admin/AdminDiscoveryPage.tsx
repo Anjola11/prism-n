@@ -75,7 +75,7 @@ export function AdminDiscoveryPage() {
         const next = { ...prev };
         for (const event of events) {
           const serverTracked = !!event.trackingEnabled;
-          next[event.id] = serverTracked || !!prev[event.id];
+          next[event.id] = serverTracked;
         }
         const prevKeys = Object.keys(prev);
         const nextKeys = Object.keys(next);
@@ -180,7 +180,7 @@ export function AdminDiscoveryPage() {
       )}
 
       <div className="grid grid-cols-1 gap-5 md:grid-cols-2 lg:grid-cols-3">
-        {events.map((event: DiscoveryCardViewModel) => (
+        {events.map((event: DiscoveryCardViewModel, index) => (
           <SignalCard
             key={event.id}
             event={event}
@@ -188,6 +188,7 @@ export function AdminDiscoveryPage() {
             isTrackPending={!!pendingByEvent[event.id]}
             onTrack={toggleSystemTrack}
             origin="admin"
+            index={index}
           />
         ))}
       </div>

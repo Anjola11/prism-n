@@ -10,24 +10,26 @@ export function ForgotPasswordPage() {
   const [email, setEmail] = useState('');
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  
-  const isValid = email.includes('@');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!isValid) return;
-    
+    const cleanEmail = email.trim();
+    if (!cleanEmail || !cleanEmail.includes('@')) {
+      setError('Please enter a valid email address.');
+      return;
+    }
+
     setIsLoading(true);
     setError('');
-    
+
     try {
-      const { uid } = await authApi.forgotPassword(email);
-      navigate({ 
-        to: '/auth/otp', 
-        search: { email, uid, type: 'forgotpassword' } 
+      const { uid } = await authApi.forgotPassword(cleanEmail);
+      navigate({
+        to: '/auth/otp',
+        search: { email: cleanEmail, uid, type: 'forgotpassword' }
       });
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to process request. Please try again.');
+      setError(err.response?.data?.message || err.response?.data?.detail || 'Failed to process request. Please try again.');
     } finally {
       setIsLoading(false);
     }
@@ -44,7 +46,7 @@ export function ForgotPasswordPage() {
         </div>
         <h2 className="text-2xl font-heading font-bold text-center text-text-primary mb-2">Reset Password</h2>
         <p className="text-text-secondary text-sm text-center mb-8 font-body">Enter your email to receive a verification code</p>
-        
+
         {error && (
           <div className="mb-4 p-3 bg-amber-500/10 border border-amber-500/20 rounded text-amber-500 text-xs flex items-center gap-2">
             <AlertCircle size={14} />
@@ -55,8 +57,8 @@ export function ForgotPasswordPage() {
         <form onSubmit={handleSubmit} className="flex flex-col gap-5">
           <div className="flex flex-col gap-2">
             <label className="font-mono text-xs text-text-secondary uppercase tracking-wider">Email Address</label>
-            <input 
-              type="email" 
+            <input
+              type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               placeholder="trader@fund.com"
@@ -65,13 +67,13 @@ export function ForgotPasswordPage() {
             />
           </div>
 
-          <Button type="submit" variant="primary" size="lg" className="mt-4" disabled={!isValid || isLoading}>
+          <Button type="submit" variant="primary" size="lg" className="mt-4" disabled={isLoading}>
             {isLoading ? 'Sending Code...' : 'Send Reset Code'}
           </Button>
-          
-          <button 
-            type="button" 
-            onClick={() => navigate({ to: '/auth/login' })} 
+
+          <button
+            type="button"
+            onClick={() => navigate({ to: '/auth/login' })}
             className="flex items-center justify-center gap-2 text-xs text-text-secondary hover:text-text-primary transition-colors mt-2"
           >
             <ArrowLeft size={12} />

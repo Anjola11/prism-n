@@ -40,7 +40,6 @@ async def lifespan(app: FastAPI):
     app.state.polymarket = PolymarketServices()
     app.state.polymarket_clob = PolymarketCLOBServices()
     app.state.polymarket_data = PolymarketDataServices()
-    logger.info("BayseServices started (HTTP Connection Pool ready)")
     app.state.live_state = LiveStateServices()
     app.state.baseline_services = BaselineServices(
         bayse=app.state.bayse,
@@ -49,68 +48,10 @@ async def lifespan(app: FastAPI):
     app.state.scoring_services = ScoringServices()
     app.state.signal_snapshot_services = SignalSnapshotServices()
     app.state.ai_insight_services = AIInsightServices()
-    app.state.bayse_ws_manager = BayseWebSocketManager(
-        bayse=app.state.bayse,
-        live_state=app.state.live_state,
-        baseline_services=app.state.baseline_services,
-        scoring_services=app.state.scoring_services,
-        signal_snapshot_services=app.state.signal_snapshot_services,
-    )
-    await app.state.bayse_ws_manager.start()
-    logger.info("Bayse websocket manager started")
-    app.state.polymarket_ws_manager = PolymarketWebSocketManager(
-        clob=app.state.polymarket_clob,
-        data_api=app.state.polymarket_data,
-        live_state=app.state.live_state,
-        baseline_services=app.state.baseline_services,
-        scoring_services=app.state.scoring_services,
-        signal_snapshot_services=app.state.signal_snapshot_services,
-    )
-    await app.state.polymarket_ws_manager.start()
-    logger.info("Polymarket websocket manager started")
-    app.state.baseline_scheduler = BaselineRefreshScheduler(
-        baseline_services=app.state.baseline_services,
-        on_refresh=_reset_all_baseline_caches(
-            app.state.bayse_ws_manager,
-            app.state.polymarket_ws_manager,
-        ),
-    )
-    await app.state.baseline_scheduler.start()
-    logger.info("Baseline refresh scheduler started")
 
-    app.state.discovery_worker = DiscoveryWorker(
-        bayse=app.state.bayse,
-        polymarket=app.state.polymarket,
-        live_state=app.state.live_state,
-    )
-    await app.state.discovery_worker.start()
-    logger.info("Discovery worker started")
+    logger.info("Stateless Web Process ready (Reads from Redis & Postgres)")
 
     yield
-    
-    if hasattr(app.state, "discovery_worker"):
-        try:
-            await app.state.discovery_worker.stop()
-        except Exception as e:
-            logger.error(f"Error stopping discovery worker: {e}")
-
-    if hasattr(app.state, "baseline_scheduler"):
-        try:
-            await app.state.baseline_scheduler.stop()
-        except Exception as e:
-            logger.error(f"Error stopping baseline scheduler: {e}")
-
-    if hasattr(app.state, "bayse_ws_manager"):
-        try:
-            await app.state.bayse_ws_manager.stop()
-        except Exception as e:
-            logger.error(f"Error stopping Bayse websocket manager: {e}")
-
-    if hasattr(app.state, "polymarket_ws_manager"):
-        try:
-            await app.state.polymarket_ws_manager.stop()
-        except Exception as e:
-            logger.error(f"Error stopping Polymarket websocket manager: {e}")
 
     if hasattr(app.state, "bayse"):
         try:
@@ -144,6 +85,7 @@ async def lifespan(app: FastAPI):
 
 
 
+
 logger.info("server starting")
 
 
@@ -163,7 +105,7 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-origins = Config.ALLOWED_ORIGINS if Config.ALLOWED_ORIGINS else ["*"]
+origins = Config.ALLOWED_ORIGINS 
 
 app.add_middleware(
     CORSMiddleware,
@@ -178,6 +120,28 @@ app.add_middleware(
     minimum_size=1024
 )
 
+import time
+import json
+from src.db.main import async_session_maker
+from sqlmodel import select
+
+@app.middleware("http")
+async def json_logging_middleware(request: Request, call_next):
+    start_time = time.time()
+    response = await call_next(request)
+    duration_ms = round((time.time() - start_time) * 1000, 2)
+    logger.info(
+        json.dumps({
+            "event": "http_request",
+            "method": request.method,
+            "path": request.url.path,
+            "status_code": response.status_code,
+            "latency_ms": duration_ms,
+        })
+    )
+    return response
+
+
 @app.get("/")
 def root_health_check():
     return "server working"
@@ -185,29 +149,50 @@ def root_health_check():
 
 @app.get("/healthz")
 def health_check():
-    bayse_ws_manager = getattr(app.state, "bayse_ws_manager", None)
-    polymarket_ws_manager = getattr(app.state, "polymarket_ws_manager", None)
-    baseline_scheduler = getattr(app.state, "baseline_scheduler", None)
-    discovery_worker = getattr(app.state, "discovery_worker", None)
     return {
         "success": True,
         "message": "Server healthy",
         "data": {
             "status": "ok",
-            "bayse_websocket_running": bool(
-                bayse_ws_manager and bayse_ws_manager._task and not bayse_ws_manager._task.done()
-            ),
-            "polymarket_websocket_running": bool(
-                polymarket_ws_manager and polymarket_ws_manager._task and not polymarket_ws_manager._task.done()
-            ),
-            "baseline_scheduler_running": bool(
-                baseline_scheduler and baseline_scheduler._task and not baseline_scheduler._task.done()
-            ),
-            "discovery_worker_running": bool(
-                discovery_worker and discovery_worker._task and not discovery_worker._task.done()
-            ),
+            "process": "web",
         },
     }
+
+
+@app.get("/readiness")
+async def readiness_check():
+    redis_ok = False
+    db_ok = False
+
+    try:
+        if redis_client:
+            await redis_client.ping()
+            redis_ok = True
+    except Exception as e:
+        logger.warning("Readiness probe Redis ping failed: %s", e)
+
+    try:
+        async with async_session_maker() as session:
+            await session.exec(select(1))
+            db_ok = True
+    except Exception as e:
+        logger.warning("Readiness probe DB ping failed: %s", e)
+
+    if redis_ok and db_ok:
+        return {
+            "success": True,
+            "message": "Service ready",
+            "data": {"redis": "ok", "db": "ok"},
+        }
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        content={
+            "success": False,
+            "message": "Service unready",
+            "data": {"redis": "ok" if redis_ok else "error", "db": "ok" if db_ok else "error"},
+        },
+    )
+
 
 
 @app.exception_handler(HTTPException)

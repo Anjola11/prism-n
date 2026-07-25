@@ -49,7 +49,16 @@ export const marketsApi = {
       params: { currency, source, category, sort_by: sortBy, page, limit },
       timeout: 45000,
     });
-    return normalizePaginated(unwrap(response), page, limit);
+    const paginated = normalizePaginated(
+      unwrap<PaginatedResponse<DiscoveryEventApi>>(response),
+      page,
+      limit,
+    );
+    paginated.items = paginated.items.map((item) => ({
+      ...item,
+      source: item.source.toUpperCase(),
+    }));
+    return paginated;
   },
   getEvents: async (currency = DEFAULT_CURRENCY, source?: string, category?: string, sortBy?: string): Promise<DiscoveryEventApi[]> => {
     const paged = await marketsApi.getEventsPage(1, 100, currency, source, category, sortBy);
@@ -57,7 +66,11 @@ export const marketsApi = {
   },
   getEvent: async (eventId: string, currency = DEFAULT_CURRENCY, source?: string): Promise<EventDetailApi> => {
     const response = await api.get(`/events/${eventId}`, { params: { currency, source } });
-    return unwrap(response);
+    const event = unwrap<EventDetailApi>(response);
+    if (event) {
+      event.source = event.source.toUpperCase();
+    }
+    return event;
   },
   getScoreHistory: async (
     eventId: string,
@@ -72,12 +85,34 @@ export const marketsApi = {
     });
     return unwrap(response);
   },
+  getBulkScoreHistory: async (
+    eventIds: string[],
+    hours = 48,
+    currency = DEFAULT_CURRENCY,
+    source?: string,
+  ): Promise<Record<string, ScoreHistoryApi>> => {
+    if (!eventIds.length) return {};
+    const response = await api.post('/events/score-history/bulk', {
+      event_ids: eventIds,
+      hours,
+      currency,
+      source,
+    }, { timeout: 45000 });
+    return unwrap(response);
+  },
   trackEvent: async (eventId: string, currency = DEFAULT_CURRENCY, source?: string): Promise<any> => {
     const response = await api.post(`/track/${eventId}`, null, { params: { currency, source } });
     return unwrap(response);
   },
   untrackEvent: async (eventId: string, currency = DEFAULT_CURRENCY, source?: string): Promise<any> => {
     const response = await api.delete(`/track/${eventId}`, { params: { currency, source } });
+    return unwrap(response);
+  },
+  refreshEvent: async (eventId: string, currency = DEFAULT_CURRENCY, source?: string): Promise<{ refreshed: number; total?: number; note?: string }> => {
+    const response = await api.post(`/events/${eventId}/refresh`, null, {
+      params: { currency, source },
+      timeout: 30000,
+    });
     return unwrap(response);
   },
   getTrackerPage: async (
@@ -89,7 +124,16 @@ export const marketsApi = {
       params: { currency, page, limit },
       timeout: 45000,
     });
-    return normalizePaginated(unwrap(response), page, limit);
+    const paginated = normalizePaginated(
+      unwrap<PaginatedResponse<DiscoveryEventApi>>(response),
+      page,
+      limit,
+    );
+    paginated.items = paginated.items.map((item) => ({
+      ...item,
+      source: item.source.toUpperCase(),
+    }));
+    return paginated;
   },
   getTracker: async (currency = DEFAULT_CURRENCY): Promise<DiscoveryEventApi[]> => {
     const paged = await marketsApi.getTrackerPage(1, 100, currency);
