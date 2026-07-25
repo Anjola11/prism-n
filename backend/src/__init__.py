@@ -31,10 +31,16 @@ from src.markets.ai_insights import AIInsightServices
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Initialize Postgres
-    await init_db()
+    try:
+        await init_db()
+    except Exception as e:
+        logger.error("Postgres initialization failed on startup: %s", e, exc_info=True)
     
     # Check Redis Connection
-    await check_redis_connection()
+    try:
+        await check_redis_connection()
+    except Exception as e:
+        logger.error("Redis connection check failed on startup: %s", e, exc_info=True)
 
     app.state.bayse = BayseServices()
     app.state.polymarket = PolymarketServices()

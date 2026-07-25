@@ -6,9 +6,21 @@ from sqlmodel import SQLModel
 from sqlalchemy.orm import sessionmaker
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+def get_async_db_url(raw_url: str) -> str:
+    if not raw_url:
+        return "sqlite+aiosqlite:///:memory:"
+    url = raw_url.strip()
+    if url.startswith("postgres://"):
+        return url.replace("postgres://", "postgresql+asyncpg://", 1)
+    if url.startswith("postgresql://") and not url.startswith("postgresql+asyncpg://"):
+        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    return url
+
+db_url = get_async_db_url(Config.DATABASE_URL)
+
 # Primary Engine for HTTP API requests
 engine = create_async_engine(
-    url=Config.DATABASE_URL,
+    url=db_url,
     echo=False,
     pool_size=10,
     max_overflow=10,
@@ -30,7 +42,7 @@ async_session_maker = sessionmaker(
 
 # Dedicated Background Engine for workers & websockets (isolates HTTP pool)
 bg_engine = create_async_engine(
-    url=Config.DATABASE_URL,
+    url=db_url,
     echo=False,
     poolclass=NullPool,
     pool_pre_ping=True,
