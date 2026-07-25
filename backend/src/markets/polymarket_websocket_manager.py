@@ -10,7 +10,7 @@ from sqlalchemy import false, or_
 from sqlmodel import select
 from websockets.asyncio.client import ClientConnection
 
-from src.db.main import async_session_maker
+from src.db.main import bg_session_maker
 from src.markets.baselines import BaselineServices
 from src.markets.live_state import (
     AssetMappingLiveState,
@@ -335,7 +335,7 @@ class PolymarketWebSocketManager:
         return bindings
 
     async def _build_subscription_plan_from_db(self) -> PolymarketSubscriptionPlan:
-        async with async_session_maker() as session:
+        async with bg_session_maker() as session:
             tracked_event_ids = set(
                 await session.exec(
                     select(UserTrackedEvent.event_id).where(UserTrackedEvent.tracking_enabled == True)
@@ -458,7 +458,7 @@ class PolymarketWebSocketManager:
         yes_token = None
         no_token = None
 
-        async with async_session_maker() as session:
+        async with bg_session_maker() as session:
             db_market = (
                 await session.exec(
                     select(TrackedMarket).where(
@@ -713,7 +713,7 @@ class PolymarketWebSocketManager:
             score_result=score_result,
         )
         if snapshot_reason:
-            async with async_session_maker() as session:
+            async with bg_session_maker() as session:
                 await self.signal_snapshot_services.persist_snapshot(
                     session=session,
                     market_state=market_state,
@@ -728,7 +728,7 @@ class PolymarketWebSocketManager:
 
         if self.baseline_services is None:
             return None
-        async with async_session_maker() as session:
+        async with bg_session_maker() as session:
             baseline = await self.baseline_services.get_market_baseline(
                 session=session,
                 market_id=market_id,
@@ -744,7 +744,7 @@ class PolymarketWebSocketManager:
         if not bindings:
             return
 
-        async with async_session_maker() as session:
+        async with bg_session_maker() as session:
             tracked_markets = (
                 await session.exec(
                     select(TrackedMarket).where(

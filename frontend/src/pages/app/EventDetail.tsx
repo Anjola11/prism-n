@@ -21,38 +21,16 @@ function resolveMarketFocus(market: EventMarketApi | null | undefined) {
     };
   }
 
-  if (market.probability_delta > 0 || market.signal.direction === 'RISING') {
-    return {
-      side: 'YES',
-      label: market.yes_outcome_label || 'YES',
-      probability: market.current_probability,
-    };
-  }
-
-  if (market.probability_delta < 0 || market.signal.direction === 'FALLING') {
-    return {
-      side: 'NO',
-      label: market.no_outcome_label || 'NO',
-      probability: market.inverse_probability,
-    };
-  }
-
-  if (
-    typeof market.current_probability === 'number' &&
-    typeof market.inverse_probability === 'number' &&
-    market.inverse_probability > market.current_probability
-  ) {
-    return {
-      side: 'NO',
-      label: market.no_outcome_label || 'NO',
-      probability: market.inverse_probability,
-    };
-  }
+  const side = market.focus_outcome_side || 'YES';
+  const label = side === 'YES'
+    ? (market.focus_outcome_label || market.yes_outcome_label || 'YES')
+    : (market.focus_outcome_label || market.no_outcome_label || 'NO');
+  const probability = side === 'YES' ? market.current_probability : market.inverse_probability;
 
   return {
-    side: 'YES',
-    label: market.yes_outcome_label || 'YES',
-    probability: market.current_probability,
+    side,
+    label,
+    probability,
   };
 }
 
@@ -98,7 +76,7 @@ export function EventDetail() {
     enabled: !!eventId,
     staleTime: 15_000,
     gcTime: 5 * 60_000,
-    refetchInterval: 30_000,
+    refetchInterval: 15_000,
     placeholderData: (previousData) => previousData,
   });
 
@@ -225,8 +203,8 @@ export function EventDetail() {
     staleTime: 5 * 60_000,
     gcTime: 10 * 60_000,
     refetchInterval: (query) => {
-      const pointCount = (query.state.data as { points?: unknown[] } | undefined)?.points?.length ?? 0;
-      return event?.tracking_enabled && pointCount < 3 ? 15_000 : false;
+      const observedPoints = (query.state.data as { observed_points?: number } | undefined)?.observed_points ?? 0;
+      return event?.tracking_enabled && observedPoints < 3 ? 15_000 : 60_000;
     },
   });
   const chartPoints = React.useMemo(() => {
@@ -253,11 +231,13 @@ export function EventDetail() {
         score: baselineScore,
         current_probability: baselineProbability,
         created_at: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
+        estimated: true,
       },
       {
         score: currentScore,
         current_probability: currentProbability,
         created_at: new Date().toISOString(),
+        estimated: true,
       },
     ];
   }, [scoreHistoryQuery.data?.points, selectedFocus.probability, selectedOutcome]);
@@ -271,21 +251,23 @@ export function EventDetail() {
     const total = buy + sell;
     const buyRatio = total > 0 ? buy / total : 0.5;
     const divergence = buyRatio > 0.65 || buyRatio < 0.35;
+    const matchesLeader = event?.highest_scoring_market?.market_id === selectedOutcome.market_id;
+
     return {
       buy_ratio: buyRatio,
       buy_notional: buy,
       sell_notional: sell,
-      unusual_flow: event?.flow_signal?.unusual_flow ?? false,
+      unusual_flow: matchesLeader ? (event?.flow_signal?.unusual_flow ?? false) : false,
       divergence,
       flow_note:
-        event?.flow_signal?.flow_note ||
+        (matchesLeader && event?.flow_signal?.flow_note) ||
         (buyRatio > 0.65
           ? 'Buy flow is dominant on the selected market.'
           : buyRatio < 0.35
             ? 'Sell pressure is dominant on the selected market.'
             : 'Balanced flow - no clear directional pressure'),
     };
-  }, [event?.flow_signal?.flow_note, event?.flow_signal?.unusual_flow, selectedOutcome]);
+  }, [event?.flow_signal?.flow_note, event?.flow_signal?.unusual_flow, event?.highest_scoring_market?.market_id, selectedOutcome]);
 
   useLayoutEffect(() => {
     if (!event || !selectedOutcome) return;
@@ -551,7 +533,7 @@ export function EventDetail() {
                 Cyan tracks Prism conviction score, while violet tracks the market probability for the side Prism is focused on. When both rise together, the move is strengthening. When probability moves without conviction, treat it as weaker information.
               </p>
             </div>
-            <div className="flex flex-wrap items-center gap-3 font-mono text-[10px] uppercase tracking-wider text-text-muted">
+            <div className="flex flex-col items-start gap-2 font-mono text-[10px] uppercase tracking-wider text-text-muted">
               <span className="inline-flex items-center gap-2">
                 <span className="h-2.5 w-2.5 rounded-full bg-prism-cyan"></span>
                 Conviction
@@ -567,7 +549,12 @@ export function EventDetail() {
               ) : null}
             </div>
           </div>
-          <ConvictionChart points={chartPoints} loading={scoreHistoryQuery.isLoading && chartPoints.length === 0} />
+          <ConvictionChart
+            points={chartPoints}
+            loading={scoreHistoryQuery.isLoading && chartPoints.length === 0}
+            observedPoints={scoreHistoryQuery.data?.observed_points ?? 0}
+            note={scoreHistoryQuery.data?.note}
+          />
         </div>
 
         <TopContendersPanel event={event} activeTabId={activeTabId} onSelect={setActiveTabId} />

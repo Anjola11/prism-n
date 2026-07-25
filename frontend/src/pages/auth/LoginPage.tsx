@@ -11,21 +11,29 @@ export function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  
-  const isValid = formData.email.includes('@') && formData.password.length > 0;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!isValid) return;
-    
+    const email = formData.email.trim();
+    const password = formData.password;
+
+    if (!email || !email.includes('@')) {
+      setError('Please enter a valid email address.');
+      return;
+    }
+    if (!password) {
+      setError('Please enter your password.');
+      return;
+    }
+
     setIsLoading(true);
     setError('');
-    
+
     try {
-      await authApi.login(formData.email, formData.password);
+      await authApi.login(email, password);
       navigate({ to: '/app' });
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Invalid email or password');
+      setError(err.response?.data?.message || err.response?.data?.detail || 'Invalid email or password.');
     } finally {
       setIsLoading(false);
     }
@@ -42,7 +50,7 @@ export function LoginPage() {
         </div>
         <h2 className="text-2xl font-heading font-bold text-center text-text-primary mb-2">Welcome Back</h2>
         <p className="text-text-secondary text-sm text-center mb-8 font-body">Sign in to Prism Intelligence</p>
-        
+
         {error && (
           <div className="mb-4 p-3 bg-amber-500/10 border border-amber-500/20 rounded text-amber-500 text-xs flex items-center gap-2">
             <AlertCircle size={14} />
@@ -53,8 +61,8 @@ export function LoginPage() {
         <form onSubmit={handleSubmit} className="flex flex-col gap-5">
           <div className="flex flex-col gap-2">
             <label className="font-mono text-xs text-text-secondary uppercase tracking-wider">Email Address</label>
-            <input 
-              type="email" 
+            <input
+              type="email"
               value={formData.email}
               onChange={(e) => setFormData(p => ({ ...p, email: e.target.value }))}
               placeholder="trader@fund.com"
@@ -62,22 +70,22 @@ export function LoginPage() {
               required
             />
           </div>
-          
+
           <div className="flex flex-col gap-2 relative">
             <label className="font-mono text-xs text-text-secondary uppercase tracking-wider flex justify-between">
               <span>Password</span>
-              <button 
-                type="button" 
+              <button
+                type="button"
                 onClick={() => navigate({ to: '/auth/forgot-password' })}
                 className="cursor-pointer text-prism-blue/70 hover:text-prism-blue"
               >Forgot password?</button>
             </label>
             <div className="relative">
-              <input 
-                type={showPassword ? 'text' : 'password'} 
+              <input
+                type={showPassword ? 'text' : 'password'}
                 value={formData.password}
                 onChange={(e) => setFormData(p => ({ ...p, password: e.target.value }))}
-                placeholder="........"
+                placeholder="••••••••"
                 className="w-full bg-navy border border-border rounded-lg pl-4 pr-10 py-2.5 text-text-primary text-sm font-mono focus:border-prism-blue focus:outline-none transition-colors"
                 required
               />
@@ -87,10 +95,10 @@ export function LoginPage() {
             </div>
           </div>
 
-          <Button type="submit" variant="primary" size="lg" className="mt-4" disabled={!isValid || isLoading}>
+          <Button type="submit" variant="primary" size="lg" className="mt-4" disabled={isLoading}>
             {isLoading ? 'Logging In...' : 'Log In'}
           </Button>
-          
+
           <div className="flex flex-col items-center gap-4 mt-4">
             <p className="text-xs text-text-secondary font-body">
               Don't have an account? <button type="button" onClick={() => navigate({ to: '/auth/signup' })} className="text-prism-blue hover:underline">Sign Up</button>
@@ -101,4 +109,3 @@ export function LoginPage() {
     </div>
   );
 }
-

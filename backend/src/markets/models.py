@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from enum import Enum
 
 import sqlalchemy.dialects.postgresql as pg
-from sqlalchemy import UniqueConstraint
+from sqlalchemy import Index, UniqueConstraint
 from sqlmodel import SQLModel, Field, Column
 
 
@@ -162,6 +162,9 @@ class MarketBaseline(SQLModel, table=True):
 
 class MarketSignalSnapshot(SQLModel, table=True):
     __tablename__ = "market_signal_snapshots"
+    __table_args__ = (
+        Index("ix_market_signal_snapshots_market_id_created_at", "market_id", "created_at"),
+    )
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
 

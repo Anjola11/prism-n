@@ -10,27 +10,40 @@ export function SignupPage() {
   const [formData, setFormData] = useState({ email: '', password: '', confirm: '' });
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
-  
+
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  
-  // Validation state
+
   const passwordLengthMatch = formData.password.length >= 8;
   const passwordsMatch = formData.password === formData.confirm && formData.password.length > 0;
-  const isValid = formData.email.includes('@') && passwordLengthMatch && passwordsMatch;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!isValid) return;
+    const email = formData.email.trim();
+    const password = formData.password;
+    const confirm = formData.confirm;
+
+    if (!email || !email.includes('@')) {
+      setError('Please enter a valid email address.');
+      return;
+    }
+    if (password.length < 8) {
+      setError('Password must be at least 8 characters long.');
+      return;
+    }
+    if (password !== confirm) {
+      setError('Passwords do not match.');
+      return;
+    }
 
     setIsLoading(true);
     setError('');
 
     try {
-      const user = await authApi.register(formData.email, formData.password, formData.confirm);
-      navigate({ to: '/auth/otp', search: { email: formData.email, uid: user.uid, type: 'signup' } });
+      const user = await authApi.register(email, password, confirm);
+      navigate({ to: '/auth/otp', search: { email, uid: user.uid, type: 'signup' } });
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to create account. Please try again.');
+      setError(err.response?.data?.message || err.response?.data?.detail || 'Failed to create account. Please try again.');
     } finally {
       setIsLoading(false);
     }
@@ -48,7 +61,7 @@ export function SignupPage() {
         </div>
         <h2 className="text-2xl font-heading font-bold text-center text-text-primary mb-2">Create Account</h2>
         <p className="text-text-secondary text-sm text-center mb-8 font-body">Sign up for institutional-grade intelligence</p>
-        
+
         {error && (
           <div className="mb-4 p-3 bg-amber-500/10 border border-amber-500/20 rounded text-amber-500 text-xs flex items-center gap-2">
             <AlertCircle size={14} />
@@ -59,8 +72,8 @@ export function SignupPage() {
         <form onSubmit={handleSubmit} className="flex flex-col gap-5">
           <div className="flex flex-col gap-2">
             <label className="font-mono text-xs text-text-secondary uppercase tracking-wider">Email Address</label>
-            <input 
-              type="email" 
+            <input
+              type="email"
               value={formData.email}
               onChange={(e) => setFormData(p => ({ ...p, email: e.target.value }))}
               placeholder="trader@fund.com"
@@ -68,12 +81,12 @@ export function SignupPage() {
               required
             />
           </div>
-          
+
           <div className="flex flex-col gap-2 relative">
             <label className="font-mono text-xs text-text-secondary uppercase tracking-wider">Password</label>
             <div className="relative">
-              <input 
-                type={showPassword ? 'text' : 'password'} 
+              <input
+                type={showPassword ? 'text' : 'password'}
                 value={formData.password}
                 onChange={(e) => setFormData(p => ({ ...p, password: e.target.value }))}
                 placeholder="••••••••"
@@ -92,8 +105,8 @@ export function SignupPage() {
           <div className="flex flex-col gap-2 relative">
             <label className="font-mono text-xs text-text-secondary uppercase tracking-wider">Confirm Password</label>
             <div className="relative">
-              <input 
-                type={showConfirm ? 'text' : 'password'} 
+              <input
+                type={showConfirm ? 'text' : 'password'}
                 value={formData.confirm}
                 onChange={(e) => setFormData(p => ({ ...p, confirm: e.target.value }))}
                 placeholder="••••••••"
@@ -112,10 +125,10 @@ export function SignupPage() {
             )}
           </div>
 
-          <Button type="submit" variant="primary" size="lg" className="mt-4" disabled={!isValid || isLoading}>
+          <Button type="submit" variant="primary" size="lg" className="mt-4" disabled={isLoading}>
             {isLoading ? 'Creating Account...' : 'Sign Up'}
           </Button>
-          
+
           <div className="flex flex-col items-center gap-4 mt-4">
             <p className="text-xs text-text-secondary font-body">
               Already have an account? <button type="button" onClick={() => navigate({ to: '/auth/login' })} className="text-prism-blue hover:underline">Log In</button>

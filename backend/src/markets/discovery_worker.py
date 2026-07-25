@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 import httpx
 from sqlmodel import select
 
-from src.db.main import async_session_maker
+from src.db.main import bg_session_maker
 from src.markets.live_state import LiveStateServices
 from src.markets.models import (
     Currency,
@@ -37,7 +37,7 @@ class DiscoveryWorker:
     """Refreshes the discovery feed read-model in Redis on a timer."""
 
     REDIS_NAMESPACE = "discovery-feed"
-    REDIS_TTL = 300  # allow several slow cycles before the feed expires
+    REDIS_TTL = 86400  # 24-hour TTL so discovery items never expire prematurely between refreshes
 
     def __init__(
         self,
@@ -54,10 +54,11 @@ class DiscoveryWorker:
         self.live_state = live_state
         self.interval_seconds = interval_seconds
         self.initial_delay_seconds = initial_delay_seconds
-        self.currencies = currencies or [Currency.NAIRA]
+        self.currencies = currencies or [Currency.DOLLAR, Currency.NAIRA]
 
         self._task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
+        self._refresh_lock = asyncio.Lock()
 
     def _get_tracked_event_icon_url(self, tracked_markets: list[TrackedMarket]) -> str | None:
         for market in tracked_markets:
@@ -137,138 +138,142 @@ class DiscoveryWorker:
 
     async def _refresh_currency(self, currency: Currency) -> None:
         """Fetch Bayse listings, enrich with tracked state, write to Redis."""
-
-        # 1. Fetch from upstreams (this is the slow part — but we're in background)
-        try:
-            listings_payload = await self.bayse.get_all_listings(currency=currency)
-            bayse_events = listings_payload.get("events", [])
-        except (httpx.TimeoutException, httpx.RequestError):
-            logger.warning(
-                "Discovery worker: Bayse timeout for %s, skipping cycle",
-                currency.value,
-            )
-            bayse_events = []
-
-        try:
-            polymarket_events = await self.polymarket.get_events(limit=24, active=True, closed=False, archived=False)
-        except (httpx.TimeoutException, httpx.RequestError):
-            logger.warning("Discovery worker: Polymarket timeout, skipping poly cycle", exc_info=True)
-            polymarket_events = []
-
-        if not bayse_events and not polymarket_events:
-            logger.info("Discovery worker: no events from Bayse or Polymarket for %s", currency.value)
+        if self._refresh_lock.locked():
+            logger.info("Discovery worker refresh already in progress for %s; skipping concurrent trigger", currency.value)
             return
 
-        # 2. Load tracking context from DB
-        async with async_session_maker() as session:
-            # System-tracked event IDs
-            system_result = await session.exec(
-                select(TrackedMarket.event_id).where(
-                    TrackedMarket.is_system_tracked == True,
-                    TrackedMarket.tracking_enabled == True,
+        async with self._refresh_lock:
+            # 1. Fetch from upstreams (this is the slow part — but we're in background)
+            try:
+                listings_payload = await self.bayse.get_all_listings(currency=currency)
+                bayse_events = listings_payload.get("events", [])
+            except (httpx.TimeoutException, httpx.RequestError):
+                logger.warning(
+                    "Discovery worker: Bayse timeout for %s, skipping cycle",
+                    currency.value,
                 )
-            )
-            system_tracked_ids: set[str] = set(system_result.all())
-
-            # All tracked markets for events in this listing
-            event_ids = [e.get("id") for e in bayse_events if e.get("id")] + [str(e.get("id")) for e in polymarket_events if e.get("id")]
-            tracked_result = await session.exec(
-                select(TrackedMarket).where(
-                    TrackedMarket.event_id.in_(event_ids),
-                    TrackedMarket.tracking_enabled == True,
-                )
-            )
-            all_tracked_markets = tracked_result.all()
-            tracked_map: dict[str, list[TrackedMarket]] = {}
-            for tm in all_tracked_markets:
-                tracked_map.setdefault(tm.event_id, []).append(tm)
-
-            # Tracked event metrics
-            metric_result = await session.exec(
-                select(TrackedEventMetric).where(
-                    TrackedEventMetric.event_id.in_(event_ids),
-                )
-            )
-            metrics: dict[tuple[str, str], TrackedEventMetric] = {}
-            for m in metric_result.all():
-                metrics[(m.event_id, m.currency.value)] = m
-
-        # 3. Build discovery cards
-        discovery_items: list[dict] = []
-        bayse_cards: list[dict] = []
-        for event_payload in bayse_events:
-            event_id = event_payload.get("id")
-            if not event_id:
-                continue
+                bayse_events = []
 
             try:
-                card = await self._build_card(
-                    event_payload=event_payload,
-                    currency=currency,
-                    tracked_markets=tracked_map.get(event_id),
-                    metric=metrics.get((event_id, currency.value)),
-                    is_system_tracked=event_id in system_tracked_ids,
-                )
-                bayse_cards.append(card)
-            except Exception:
-                logger.warning(
-                    "Discovery worker: failed to build card for event %s",
-                    event_id,
-                    exc_info=True,
-                )
+                polymarket_events = await self.polymarket.get_events(limit=24, active=True, closed=False, archived=False)
+            except (httpx.TimeoutException, httpx.RequestError):
+                logger.warning("Discovery worker: Polymarket timeout, skipping poly cycle", exc_info=True)
+                polymarket_events = []
 
-        polymarket_cards: list[dict] = []
-        for event_payload in polymarket_events:
-            event_id = str(event_payload.get("id") or "")
-            if not event_id:
-                continue
+            if not bayse_events and not polymarket_events:
+                logger.info("Discovery worker: no events from Bayse or Polymarket for %s", currency.value)
+                return
 
-            try:
-                card = await self._build_polymarket_card(
-                    event_payload=event_payload,
-                    tracked_markets=tracked_map.get(event_id),
-                    metric=metrics.get((event_id, Currency.DOLLAR.value)),
-                    is_system_tracked=event_id in system_tracked_ids,
+            # 2. Load tracking context from DB
+            async with bg_session_maker() as session:
+                # System-tracked event IDs
+                system_result = await session.exec(
+                    select(TrackedMarket.event_id).where(
+                        TrackedMarket.is_system_tracked == True,
+                        TrackedMarket.tracking_enabled == True,
+                    )
                 )
-                polymarket_cards.append(card)
-            except Exception:
-                logger.warning(
-                    "Discovery worker: failed to build polymarket card for event %s",
-                    event_id,
-                    exc_info=True,
-                )
+                system_tracked_ids: set[str] = set(system_result.all())
 
-        bayse_cards.sort(
-            key=lambda item: (
-                item.get("data_mode") != "tracked_live",
-                not item.get("tracking_enabled", False),
-                (item.get("event_title") or "").lower(),
+                # All tracked markets for events in this listing
+                event_ids = [e.get("id") for e in bayse_events if e.get("id")] + [str(e.get("id")) for e in polymarket_events if e.get("id")]
+                tracked_result = await session.exec(
+                    select(TrackedMarket).where(
+                        TrackedMarket.event_id.in_(event_ids),
+                        TrackedMarket.tracking_enabled == True,
+                    )
+                )
+                all_tracked_markets = tracked_result.all()
+                tracked_map: dict[str, list[TrackedMarket]] = {}
+                for tm in all_tracked_markets:
+                    tracked_map.setdefault(tm.event_id, []).append(tm)
+
+                # Tracked event metrics
+                metric_result = await session.exec(
+                    select(TrackedEventMetric).where(
+                        TrackedEventMetric.event_id.in_(event_ids),
+                    )
+                )
+                metrics: dict[tuple[str, str], TrackedEventMetric] = {}
+                for m in metric_result.all():
+                    metrics[(m.event_id, m.currency.value)] = m
+
+            # 3. Build discovery cards
+            discovery_items: list[dict] = []
+            bayse_cards: list[dict] = []
+            for event_payload in bayse_events:
+                event_id = event_payload.get("id")
+                if not event_id:
+                    continue
+
+                try:
+                    card = await self._build_card(
+                        event_payload=event_payload,
+                        currency=currency,
+                        tracked_markets=tracked_map.get(event_id),
+                        metric=metrics.get((event_id, currency.value)),
+                        is_system_tracked=event_id in system_tracked_ids,
+                    )
+                    bayse_cards.append(card)
+                except Exception:
+                    logger.warning(
+                        "Discovery worker: failed to build card for event %s",
+                        event_id,
+                        exc_info=True,
+                    )
+
+            polymarket_cards: list[dict] = []
+            for event_payload in polymarket_events:
+                event_id = str(event_payload.get("id") or "")
+                if not event_id:
+                    continue
+
+                try:
+                    card = await self._build_polymarket_card(
+                        event_payload=event_payload,
+                        tracked_markets=tracked_map.get(event_id),
+                        metric=metrics.get((event_id, Currency.DOLLAR.value)),
+                        is_system_tracked=event_id in system_tracked_ids,
+                    )
+                    polymarket_cards.append(card)
+                except Exception:
+                    logger.warning(
+                        "Discovery worker: failed to build polymarket card for event %s",
+                        event_id,
+                        exc_info=True,
+                    )
+
+            bayse_cards.sort(
+                key=lambda item: (
+                    item.get("data_mode") != "tracked_live",
+                    not item.get("tracking_enabled", False),
+                    (item.get("event_title") or "").lower(),
+                )
             )
-        )
-        polymarket_cards.sort(
-            key=lambda item: (
-                item.get("data_mode") != "tracked_live",
-                not item.get("tracking_enabled", False),
-                -(item.get("total_liquidity") or 0.0),
-                -(item.get("event_total_orders") or 0),
+            polymarket_cards.sort(
+                key=lambda item: (
+                    item.get("data_mode") != "tracked_live",
+                    not item.get("tracking_enabled", False),
+                    -(item.get("total_liquidity") or 0.0),
+                    -(item.get("event_total_orders") or 0),
+                )
             )
-        )
 
-        # 4. Mix: first 3 Bayse cards, then Polymarket ranked by liquidity/activity, then leftover Bayse
-        discovery_items = bayse_cards[:3] + polymarket_cards + bayse_cards[3:]
+            # 4. Mix: first 3 Bayse cards, then Polymarket ranked by liquidity/activity, then leftover Bayse
+            discovery_items = bayse_cards[:3] + polymarket_cards + bayse_cards[3:]
 
-        # 5. Write to Redis
-        await self.live_state.set_read_model(
-            namespace=self.REDIS_NAMESPACE,
-            identifier=currency.value,
-            payload=discovery_items,
-            ttl_seconds=self.REDIS_TTL,
-        )
-        logger.info(
-            "Discovery worker: refreshed %d events for %s",
-            len(discovery_items),
-            currency.value,
-        )
+            # 5. Write to Redis
+            await self.live_state.set_read_model(
+                namespace=self.REDIS_NAMESPACE,
+                identifier=currency.value,
+                payload=discovery_items,
+                ttl_seconds=self.REDIS_TTL,
+            )
+            logger.info(
+                "Discovery worker: refreshed %d events for %s",
+                len(discovery_items),
+                currency.value,
+            )
 
     async def _build_card(
         self,

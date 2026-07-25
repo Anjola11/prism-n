@@ -162,59 +162,55 @@ class AdminServices:
         if cached_analytics is not None:
             return cached_analytics
 
-        total_users = (await session.exec(select(func.count()).select_from(User))).one()
-        verified_users = (
-            await session.exec(
-                select(func.count()).select_from(User).where(User.email_verified == True)
-            )
-        ).one()
-        admin_users = (
-            await session.exec(
-                select(func.count()).select_from(User).where(User.role == UserRole.ADMIN)
-            )
-        ).one()
-        total_user_event_links = (
-            await session.exec(
-                select(func.count()).select_from(UserTrackedEvent).where(UserTrackedEvent.tracking_enabled == True)
-            )
-        ).one()
-
-        tracked_event_rows = (
-            await session.exec(
+        (
+            total_users,
+            verified_users,
+            admin_users,
+            total_user_event_links,
+            tracked_event_rows,
+            total_user_tracked_events,
+            total_system_tracked_markets,
+            total_system_tracked_events,
+            recent_signal_snapshot_count,
+        ) = await asyncio.gather(
+            session.exec(select(func.count()).select_from(User)),
+            session.exec(select(func.count()).select_from(User).where(User.email_verified == True)),
+            session.exec(select(func.count()).select_from(User).where(User.role == UserRole.ADMIN)),
+            session.exec(select(func.count()).select_from(UserTrackedEvent).where(UserTrackedEvent.tracking_enabled == True)),
+            session.exec(
                 select(UserTrackedEvent.event_id, func.count(UserTrackedEvent.id))
                 .where(UserTrackedEvent.tracking_enabled == True)
                 .group_by(UserTrackedEvent.event_id)
-            )
-        ).all()
-        total_user_tracked_events = (
-            await session.exec(
+            ),
+            session.exec(
                 select(func.count(func.distinct(UserTrackedEvent.event_id))).where(
                     UserTrackedEvent.tracking_enabled == True
                 )
-            )
-        ).one()
-
-        total_system_tracked_markets = (
-            await session.exec(
+            ),
+            session.exec(
                 select(func.count()).select_from(TrackedMarket).where(
                     TrackedMarket.is_system_tracked == True,
                     TrackedMarket.tracking_enabled == True,
                 )
-            )
-        ).one()
-
-        total_system_tracked_events = (
-            await session.exec(
+            ),
+            session.exec(
                 select(func.count(func.distinct(TrackedMarket.event_id))).where(
                     TrackedMarket.is_system_tracked == True,
                     TrackedMarket.tracking_enabled == True,
                 )
-            )
-        ).one()
+            ),
+            session.exec(select(func.count()).select_from(MarketSignalSnapshot)),
+        )
 
-        recent_signal_snapshot_count = (
-            await session.exec(select(func.count()).select_from(MarketSignalSnapshot))
-        ).one()
+        total_users = total_users.one()
+        verified_users = verified_users.one()
+        admin_users = admin_users.one()
+        total_user_event_links = total_user_event_links.one()
+        tracked_event_rows = tracked_event_rows.all()
+        total_user_tracked_events = total_user_tracked_events.one()
+        total_system_tracked_markets = total_system_tracked_markets.one()
+        total_system_tracked_events = total_system_tracked_events.one()
+        recent_signal_snapshot_count = recent_signal_snapshot_count.one()
 
         event_meta = {}
         if tracked_event_rows:

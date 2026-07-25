@@ -37,7 +37,7 @@ export function ResetPasswordPage() {
         navigate({ to: '/auth/login' });
       }, 2000);
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to reset password. Please try again.');
+      setError(err.response?.data?.message || err.response?.data?.detail || 'Failed to reset password. Please try again.');
     } finally {
       setIsLoading(false);
     }

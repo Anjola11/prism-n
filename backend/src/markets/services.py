@@ -60,8 +60,8 @@ class MarketServices:
     AI_INSIGHT_PLACEHOLDER = "AI insight is warming up."
     DISCOVERY_FEED_CACHE_TTL = 300
     DISCOVERY_FEED_BUILD_LOCK_TTL = 30
-    LIVE_STATE_MARKET_READ_CONCURRENCY = 4
-    TRACKER_EVENT_BUILD_CONCURRENCY = 2
+    LIVE_STATE_MARKET_READ_CONCURRENCY = 16
+    TRACKER_EVENT_BUILD_CONCURRENCY = 10
 
     def __init__(
         self,
@@ -709,25 +709,23 @@ class MarketServices:
         if not market_ids:
             return {}
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
-        rows = (
-            await session.exec(
-                select(
-                    MarketSignalSnapshot.market_id,
-                    MarketSignalSnapshot.score,
-                    MarketSignalSnapshot.created_at,
-                ).where(
-                    MarketSignalSnapshot.market_id.in_(market_ids),
-                    MarketSignalSnapshot.created_at >= cutoff,
-                ).order_by(
-                    MarketSignalSnapshot.market_id,
-                    MarketSignalSnapshot.created_at.asc(),
-                )
+        statement = (
+            select(
+                MarketSignalSnapshot.market_id,
+                MarketSignalSnapshot.score,
             )
-        ).all()
-        oldest_scores: dict[str, float] = {}
-        for market_id, score, _ in rows:
-            oldest_scores.setdefault(market_id, score)
-        return oldest_scores
+            .distinct(MarketSignalSnapshot.market_id)
+            .where(
+                MarketSignalSnapshot.market_id.in_(market_ids),
+                MarketSignalSnapshot.created_at >= cutoff,
+            )
+            .order_by(
+                MarketSignalSnapshot.market_id,
+                MarketSignalSnapshot.created_at.asc(),
+            )
+        )
+        rows = (await session.exec(statement)).all()
+        return {market_id: score for market_id, score in rows}
 
     async def _attach_market_score_deltas(
         self,
@@ -787,9 +785,26 @@ class MarketServices:
             anchor_probability = first_observed.current_probability
             anchor_time = first_observed.created_at
         else:
-            score_delta_48h = current_market.score_delta_48h or 0.0
+            score_delta_48h = current_market.score_delta_48h
+            if score_delta_48h is None or score_delta_48h == 0.0:
+                direction = (current_market.signal.direction or "STABLE").upper()
+                factors = current_market.signal.factors or {}
+                move_factor = float(factors.get("move", 0.3)) if isinstance(factors, dict) else 0.3
+                prob_delta = current_market.probability_delta or 0.0
+
+                if direction in ("RISING", "UP"):
+                    score_delta_48h = max(6.0, current_score * 0.45 * max(0.25, move_factor))
+                elif direction in ("FALLING", "DOWN"):
+                    score_delta_48h = -max(6.0, current_score * 0.45 * max(0.25, move_factor))
+                elif abs(prob_delta) > 0.001:
+                    score_delta_48h = round(prob_delta * 40.0, 2)
+                else:
+                    score_delta_48h = 0.0
+
             anchor_score = max(0.0, min(100.0, current_score - score_delta_48h))
-            anchor_probability = self._clamp_percentage(current_live_probability if current_live_probability is not None else current_probability)
+            prob_delta = current_market.probability_delta or 0.0
+            raw_anchor_prob = (current_live_probability if current_live_probability is not None else current_probability)
+            anchor_probability = self._clamp_percentage(raw_anchor_prob - prob_delta) if raw_anchor_prob is not None else None
             anchor_time = current_time - timedelta(hours=48)
 
         midpoint_time = anchor_time + (current_time - anchor_time) / 2
@@ -2937,37 +2952,23 @@ class MarketServices:
 
         if cached is None or not isinstance(cached, list):
             logger.warning(
-                "Discovery feed cache unavailable for %s; building fallback response",
+                "Discovery feed cache unavailable for %s; building live fallback feed",
                 currency.value,
             )
-            build_locally = True
-            if self.live_state:
-                lock_acquired = await self._safe_acquire_coordination_lock(
-                    namespace="discovery-feed-build",
+            fallback_items = await self._build_discovery_feed_fallback(
+                session=session,
+                user_id=user_id,
+                source=source,
+                currency=currency,
+            )
+            cached = [item.model_dump(mode="json") for item in fallback_items]
+            if cached and self.live_state:
+                await self._safe_set_read_model(
+                    namespace="discovery-feed",
                     identifier=currency.value,
-                    ttl_seconds=self.DISCOVERY_FEED_BUILD_LOCK_TTL,
+                    payload=cached,
+                    ttl_seconds=86400,
                 )
-                if not lock_acquired:
-                    warmed_cache = await self._wait_for_discovery_cache_fill(currency=currency)
-                    if warmed_cache is not None:
-                        cached = warmed_cache
-                        build_locally = False
-
-            if build_locally:
-                fallback_cards = await self._build_discovery_feed_fallback(
-                    session=session,
-                    user_id=user_id,
-                    source=source,
-                    currency=currency,
-                )
-                cached = [item.model_dump(mode="json") for item in fallback_cards]
-                if self.live_state:
-                    await self._safe_set_read_model(
-                        namespace="discovery-feed",
-                        identifier=currency.value,
-                        payload=cached,
-                        ttl_seconds=self.DISCOVERY_FEED_CACHE_TTL,
-                    )
 
         filtered_cached = [
             item
@@ -3087,37 +3088,22 @@ class MarketServices:
 
         if cached is None or not isinstance(cached, list):
             logger.warning(
-                "Admin discovery feed cache unavailable for %s; building fallback response",
+                "Admin discovery feed cache unavailable for %s; building live fallback feed",
                 currency.value,
             )
-            build_locally = True
-            if self.live_state:
-                lock_acquired = await self._safe_acquire_coordination_lock(
-                    namespace="discovery-feed-build",
+            fallback_items = await self._build_discovery_feed_fallback(
+                session=session,
+                source=source,
+                currency=currency,
+            )
+            cached = [item.model_dump(mode="json") for item in fallback_items]
+            if cached and self.live_state:
+                await self._safe_set_read_model(
+                    namespace="discovery-feed",
                     identifier=currency.value,
-                    ttl_seconds=self.DISCOVERY_FEED_BUILD_LOCK_TTL,
+                    payload=cached,
+                    ttl_seconds=86400,
                 )
-                if not lock_acquired:
-                    warmed_cache = await self._wait_for_discovery_cache_fill(currency=currency)
-                    if warmed_cache is not None:
-                        cached = warmed_cache
-                        build_locally = False
-
-            if build_locally:
-                fallback_cards = await self._build_discovery_feed_fallback(
-                    session=session,
-                    user_id=None,
-                    source=source,
-                    currency=currency,
-                )
-                cached = [item.model_dump(mode="json") for item in fallback_cards]
-                if self.live_state:
-                    await self._safe_set_read_model(
-                        namespace="discovery-feed",
-                        identifier=currency.value,
-                        payload=cached,
-                        ttl_seconds=self.DISCOVERY_FEED_CACHE_TTL,
-                    )
 
         # One fast DB query for system-tracked event IDs
         system_result = await session.exec(

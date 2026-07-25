@@ -246,8 +246,8 @@ export function AdminOverviewPage() {
           {overviewQuery.isLoading && systemTrackedEvents.length === 0 && Array.from({ length: 2 }).map((_, index) => (
             <div key={`admin-preview-skeleton-${index}`} className="h-[360px] animate-pulse rounded-xl border border-border bg-card" />
           ))}
-          {systemTrackedEvents.map((event: DiscoveryCardViewModel) => (
-            <SignalCard key={event.id} event={event} isTracked origin="admin" />
+          {systemTrackedEvents.map((event: DiscoveryCardViewModel, index) => (
+            <SignalCard key={event.id} event={event} isTracked origin="admin" index={index} />
           ))}
           {!overviewQuery.isLoading && systemTrackedEvents.length === 0 && (
             <p className="text-sm text-text-muted">The system is not tracking any events yet.</p>

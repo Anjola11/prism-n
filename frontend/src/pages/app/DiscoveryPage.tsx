@@ -127,7 +127,7 @@ export function DiscoveryPage() {
         const next = { ...prev };
         for (const event of events) {
           const serverTracked = !!event.trackingEnabled;
-          next[event.id] = serverTracked || !!prev[event.id];
+          next[event.id] = serverTracked;
         }
         const prevKeys = Object.keys(prev);
         const nextKeys = Object.keys(next);
@@ -250,9 +250,9 @@ export function DiscoveryPage() {
           />
         ))}
 
-        {!discoveryQuery.isLoading && filteredEvents.map((event) => (
+        {!discoveryQuery.isLoading && filteredEvents.map((event, index) => (
           <div key={event.id} className="event-card-wrapper h-full" data-event-id={event.id}>
-            <SignalCard event={event} onTrack={toggleTrack} isTracked={!!tracked[event.id]} origin="discovery" />
+            <SignalCard event={event} onTrack={toggleTrack} isTracked={!!tracked[event.id]} origin="discovery" index={index} />
           </div>
         ))}
 

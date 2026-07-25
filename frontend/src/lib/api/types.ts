@@ -86,6 +86,8 @@ export interface EventMarketApi {
   probability_delta: number;
   score_delta_48h?: number | null;
   event_liquidity: number | null;
+  focus_outcome_side?: string | null;
+  focus_outcome_label?: string | null;
   signal: SignalApi;
   last_updated: string | null;
 }
@@ -109,12 +111,16 @@ export interface ScoreHistoryPointApi {
   score: number;
   current_probability: number | null;
   created_at: string;
+  estimated?: boolean;
 }
 
 export interface ScoreHistoryApi {
   event_id: string;
   market_id: string;
   points: ScoreHistoryPointApi[];
+  observed_points?: number;
+  warmup?: boolean;
+  note?: string | null;
 }
 
 export interface MostTrackedEventApi {

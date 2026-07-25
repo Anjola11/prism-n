@@ -500,6 +500,11 @@ class AuthServices:
         response: Response,
         request: Request | None = None,
     ):
+        if not old_refresh_token_str:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Refresh token missing"
+            )
         old_refresh_token_decode = decode_token(old_refresh_token_str)
 
         if old_refresh_token_decode.get('type') != "refresh":

@@ -20,29 +20,33 @@ export function OTPPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (otp.length === 6) {
-      setIsLoading(true);
-      setError('');
-      setNotice('');
-      try {
-        if (!uid) {
-          throw new Error('Session missing. Please try again.');
-        }
-        const result = await authApi.verifyOTP(uid, otp, type as 'signup' | 'forgotpassword');
-        
-        if (type === 'forgotpassword') {
-          navigate({ 
-            to: '/auth/reset-password', 
-            search: { reset_token: result.reset_token } 
-          });
-        } else {
-          navigate({ to: '/app' });
-        }
-      } catch (err: any) {
-        setError(err.response?.data?.detail || 'Invalid OTP or verification failed.');
-      } finally {
-        setIsLoading(false);
+    if (otp.length !== 6) {
+      setError('Please enter the full 6-digit verification code.');
+      return;
+    }
+    if (!uid) {
+      setError('Session missing. Please try signing up again.');
+      return;
+    }
+
+    setIsLoading(true);
+    setError('');
+    setNotice('');
+    try {
+      const result = await authApi.verifyOTP(uid, otp, type as 'signup' | 'forgotpassword');
+
+      if (type === 'forgotpassword') {
+        navigate({
+          to: '/auth/reset-password',
+          search: { reset_token: result.reset_token }
+        });
+      } else {
+        navigate({ to: '/app' });
       }
+    } catch (err: any) {
+      setError(err.response?.data?.message || err.response?.data?.detail || 'Invalid OTP or verification failed.');
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -59,7 +63,7 @@ export function OTPPage() {
       await authApi.resendOTP(email, type as 'signup' | 'forgotpassword');
       setNotice('A new OTP has been sent to your email.');
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to resend OTP.');
+      setError(err.response?.data?.message || err.response?.data?.detail || 'Failed to resend OTP.');
     } finally {
       setIsResending(false);
     }
@@ -77,7 +81,7 @@ export function OTPPage() {
         </div>
         <h2 className="text-2xl font-heading font-bold text-center mb-2">Verify Email</h2>
         <p className="text-text-secondary text-sm text-center mb-8">We sent a 6-digit code to <span className="text-text-primary font-mono">{email}</span></p>
-        
+
         {error && (
           <div className="mb-4 p-3 bg-amber-500/10 border border-amber-500/20 rounded text-amber-500 text-xs flex items-center gap-2">
             <AlertCircle size={14} />
@@ -94,8 +98,8 @@ export function OTPPage() {
         <form onSubmit={handleSubmit} className="flex flex-col gap-4">
           <div>
             <label className="block font-body text-sm text-text-secondary mb-2 text-center">Enter Code</label>
-            <input 
-              type="text" 
+            <input
+              type="text"
               maxLength={6}
               value={otp}
               onChange={(e) => setOtp(e.target.value.replace(/\D/g, ''))}
@@ -104,7 +108,7 @@ export function OTPPage() {
               required
             />
           </div>
-          <Button type="submit" variant="primary" size="lg" className="mt-2" disabled={otp.length !== 6 || isLoading}>
+          <Button type="submit" variant="primary" size="lg" className="mt-2" disabled={isLoading}>
             {isLoading ? 'Verifying...' : 'Verify Code'}
           </Button>
           <Button type="button" variant="ghost" size="sm" className="mt-1" onClick={handleResend} disabled={isResending}>

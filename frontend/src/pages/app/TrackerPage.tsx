@@ -15,7 +15,7 @@ export function TrackerPage() {
   const previousEventIdsRef = useRef<string[]>([]);
   const queryClient = useQueryClient();
   const [tracked, setTracked] = useState<Record<string, boolean>>({});
-  const [syncTimer, setSyncTimer] = useState(12);
+  const [syncTimer, setSyncTimer] = useState(0);
   const trackerQuery = useInfiniteQuery({
     queryKey: ['tracker-feed', DEFAULT_PAGE_SIZE],
     queryFn: ({ pageParam }) => {
@@ -64,11 +64,14 @@ export function TrackerPage() {
 
   useEffect(() => {
     const interval = setInterval(() => {
-      setSyncTimer((prev) => (prev >= 30 ? 0 : prev + 1));
+      if (trackerQuery.dataUpdatedAt) {
+        const elapsed = Math.round((Date.now() - trackerQuery.dataUpdatedAt) / 1000);
+        setSyncTimer(Math.max(0, elapsed));
+      }
     }, 1000);
 
     return () => clearInterval(interval);
-  }, []);
+  }, [trackerQuery.dataUpdatedAt]);
 
   useLayoutEffect(() => {
     if (events.length === 0) return;
@@ -177,9 +180,9 @@ export function TrackerPage() {
           />
         ))}
 
-        {!trackerQuery.isLoading && events.map((event) => (
+        {!trackerQuery.isLoading && events.map((event, index) => (
           <div key={event.id} className="event-card-wrapper h-full" data-event-id={event.id}>
-            <SignalCard event={event} onTrack={toggleTrack} isTracked={!!tracked[event.id]} origin="tracker" />
+            <SignalCard event={event} onTrack={toggleTrack} isTracked={!!tracked[event.id]} origin="tracker" index={index} />
           </div>
         ))}
 

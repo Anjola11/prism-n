@@ -9,7 +9,7 @@ from sqlalchemy import false, or_
 from sqlmodel import select
 from websockets.asyncio.client import ClientConnection
 
-from src.db.main import async_session_maker
+from src.db.main import bg_session_maker
 from src.markets.baselines import BaselineServices
 from src.markets.live_state import (
     BayseSubscriptionPlan,
@@ -227,7 +227,7 @@ class BayseWebSocketManager:
         return plan
 
     async def _build_subscription_plan_from_db(self) -> BayseSubscriptionPlan:
-        async with async_session_maker() as session:
+        async with bg_session_maker() as session:
             tracked_event_ids = set(
                 await session.exec(
                     select(UserTrackedEvent.event_id).where(UserTrackedEvent.tracking_enabled == True)
@@ -610,7 +610,7 @@ class BayseWebSocketManager:
             score_result=score_result,
         )
         if snapshot_reason:
-            async with async_session_maker() as session:
+            async with bg_session_maker() as session:
                 await self.signal_snapshot_services.persist_snapshot(
                     session=session,
                     market_state=market_state,
@@ -623,7 +623,7 @@ class BayseWebSocketManager:
         if cache_key in self._baseline_cache:
             return self._baseline_cache[cache_key]
 
-        async with async_session_maker() as session:
+        async with bg_session_maker() as session:
             baseline = await self.baseline_services.get_market_baseline(
                 session=session,
                 market_id=market_id,
@@ -633,7 +633,7 @@ class BayseWebSocketManager:
         return sigma
 
     async def _get_event_currencies(self, event_id: str) -> list[Currency]:
-        async with async_session_maker() as session:
+        async with bg_session_maker() as session:
             result = await session.exec(
                 select(TrackedEventMetric.currency).where(
                     TrackedEventMetric.source == MarketSource.BAYSE,
@@ -660,7 +660,7 @@ class BayseWebSocketManager:
             )
 
     async def _resync_tracked_events_from_rest(self) -> None:
-        async with async_session_maker() as session:
+        async with bg_session_maker() as session:
             tracked_event_ids = set(
                 await session.exec(
                     select(UserTrackedEvent.event_id).where(UserTrackedEvent.tracking_enabled == True)
