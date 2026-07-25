@@ -1,5 +1,5 @@
 import React, { useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
 import gsap from 'gsap';
 import { Filter } from 'lucide-react';
 
@@ -9,9 +9,12 @@ import type { DiscoveryCardViewModel } from '../../lib/api/types';
 import { DEFAULT_PAGE_SIZE } from '../../lib/constants';
 import { SignalCard } from '../../components/ui/SignalCard';
 import { useInfiniteScrollSentinel } from '../../hooks/useInfiniteScrollSentinel';
+import { useRealtimeStream } from '../../hooks/useRealtimeStream';
 
 export function DiscoveryPage() {
+  useRealtimeStream();
   const container = useRef<HTMLDivElement>(null);
+
   const hasAnimatedForFilterRef = useRef(false);
   const previousEventIdsRef = useRef<string[]>([]);
   const queryClient = useQueryClient();
@@ -47,6 +50,33 @@ export function DiscoveryPage() {
     () => discoveryQuery.data?.pages.flatMap((page) => page.items.map(mapDiscoveryEvent)) || [],
     [discoveryQuery.data],
   );
+
+  const eventIds = useMemo(() => events.map((e) => e.id), [events]);
+  useQuery({
+    queryKey: ['bulk-score-history', eventIds.join(','), filter],
+    queryFn: async () => {
+      const data = await marketsApi.getBulkScoreHistory(
+        eventIds,
+        48,
+        undefined,
+        filter === 'ALL' ? undefined : filter.toLowerCase(),
+      );
+      for (const event of events) {
+        const history = data[event.id];
+        if (history) {
+          const topMarket = event.highestScoringMarket;
+          queryClient.setQueryData(
+            ['score-history', event.id, topMarket?.marketId, 48, event.source.toLowerCase()],
+            history,
+          );
+        }
+      }
+      return data;
+    },
+    enabled: eventIds.length > 0,
+    staleTime: 5 * 60 * 1000,
+    gcTime: 10 * 60 * 1000,
+  });
 
   const loadMoreRef = useInfiniteScrollSentinel({
     hasNextPage: !!discoveryQuery.hasNextPage,

@@ -119,9 +119,10 @@ class EventMarketRead(BaseModel):
     market_image_128_url: str | None = None
     rules: str | None = None
     yes_outcome_id: str
-    yes_outcome_label: str
+    yes_outcome_label: str = Field(default="YES")
     no_outcome_id: str
-    no_outcome_label: str
+    no_outcome_label: str = Field(default="NO")
+
     current_probability: float | None = None
     inverse_probability: float | None = None
     market_total_orders: int | None = None
@@ -206,6 +207,13 @@ class ScoreHistoryRead(BaseModel):
     observed_points: int = 0
     warmup: bool = False
     note: str | None = None
+
+
+class BulkScoreHistoryRequest(BaseModel):
+    event_ids: list[str]
+    hours: int = 48
+    source: MarketSource = MarketSource.BAYSE
+    currency: Currency = Currency.DOLLAR
 
 
 class SuccessResponse(BaseModel):

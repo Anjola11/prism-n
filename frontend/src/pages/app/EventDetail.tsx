@@ -1,7 +1,7 @@
 import React, { useLayoutEffect, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useParams, useSearch } from '@tanstack/react-router';
-import { Activity, ArrowLeft, Droplets, ExternalLink, Sparkles, TrendingDown, TrendingUp, Users, Zap } from 'lucide-react';
+import { Activity, ArrowLeft, Droplets, ExternalLink, RefreshCw, Sparkles, TrendingDown, TrendingUp, Users, Zap } from 'lucide-react';
 import gsap from 'gsap';
 
 import { marketsApi } from '../../lib/api/markets';
@@ -69,6 +69,8 @@ export function EventDetail() {
 
   const [activeTabId, setActiveTabId] = useState('');
   const [trackPending, setTrackPending] = useState(false);
+  const [refreshPending, setRefreshPending] = useState(false);
+  const [refreshCooldown, setRefreshCooldown] = useState(false);
   const requestedSource = search.source || undefined;
   const eventQuery = useQuery({
     queryKey: ['event-detail', eventId, requestedSource],
@@ -331,6 +333,27 @@ export function EventDetail() {
     }
   };
 
+  const handleRefresh = async () => {
+    if (!event || refreshPending || refreshCooldown) return;
+    setRefreshPending(true);
+    try {
+      await marketsApi.refreshEvent(event.event_id, event.currency, event.source.toLowerCase());
+      // Invalidate all queries for this event so fresh data renders immediately
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['event-detail', eventId] }),
+        queryClient.invalidateQueries({ queryKey: ['score-history', eventId] }),
+      ]);
+      await eventQuery.refetch();
+    } catch {
+      // Silently ignore — the auto-refetch at 15s will catch it
+    } finally {
+      setRefreshPending(false);
+      // 30s cooldown to prevent CLOB API rate-limit hammering
+      setRefreshCooldown(true);
+      setTimeout(() => setRefreshCooldown(false), 30_000);
+    }
+  };
+
   return (
     <div ref={container} className="mx-auto flex max-w-4xl flex-col gap-6 px-6 py-8">
       <div className="flex items-center gap-2">
@@ -373,6 +396,29 @@ export function EventDetail() {
               className="inline-flex items-center gap-2 rounded border border-prism-blue/30 bg-navy px-3 py-1.5 font-mono text-[11px] uppercase tracking-wide text-prism-cyan transition-colors hover:border-prism-blue hover:text-text-primary"
             >
               View trade on {event.source} <ExternalLink size={12} />
+            </button>
+          )}
+          {/* Refresh button — available for Polymarket events */}
+          {event.source === 'POLYMARKET' && (
+            <button
+              id="refresh-market-data-btn"
+              type="button"
+              onClick={handleRefresh}
+              disabled={refreshPending || refreshCooldown}
+              title={refreshCooldown ? 'Please wait 30s between refreshes' : 'Fetch latest prices from Polymarket CLOB'}
+              className={`inline-flex items-center gap-1.5 rounded border px-3 py-1.5 font-mono text-[11px] uppercase tracking-wide transition-all ${
+                refreshPending
+                  ? 'cursor-not-allowed border-border bg-card text-text-muted'
+                  : refreshCooldown
+                    ? 'cursor-not-allowed border-border/40 bg-card/50 text-text-dim'
+                    : 'border-prism-cyan/30 bg-prism-cyan/8 text-prism-cyan hover:border-prism-cyan/60 hover:bg-prism-cyan/15'
+              }`}
+            >
+              <RefreshCw
+                size={11}
+                className={refreshPending ? 'animate-spin' : ''}
+              />
+              {refreshPending ? 'Refreshing...' : refreshCooldown ? 'Refreshed' : 'Refresh'}
             </button>
           )}
           <button

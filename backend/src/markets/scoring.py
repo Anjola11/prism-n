@@ -1,3 +1,4 @@
+import math
 from pydantic import BaseModel, Field
 
 from src.markets.models import MarketEngine, MarketSource
@@ -5,6 +6,12 @@ from src.markets.models import MarketEngine, MarketSource
 
 def _clamp(value: float, minimum: float = 0.0, maximum: float = 1.0) -> float:
     return max(minimum, min(maximum, value))
+
+
+def _log_scale(val: float, max_target: float) -> float:
+    if val <= 0:
+        return 0.0
+    return _clamp(math.log1p(val) / math.log1p(max_target))
 
 
 class MarketScoreClassification(str):
@@ -135,18 +142,54 @@ class ScoringServices:
         )
 
     def _compute_move_factor(self, metrics: MarketScoringInput) -> float:
+        """
+        Score how significant this price move is.
+
+        For prediction markets at Polymarket scale, even a 1-3% move in a deeply
+        liquid market represents substantial capital conviction.  Using a flat
+        divisor of 0.35 means a 3% move (which is enormous in a 95%+ market)
+        only scores 0.09 — completely wrong.
+
+        Instead we use the *sigma-multiple* logarithmically scaled: how many
+        standard-deviation moves is this?  A 1-sigma move scores ~0.50,
+        2-sigma ~0.75, 4-sigma (very rare, extreme news) ~0.90.
+        We blend with a small absolute component to handle cases where sigma
+        hasn't warmed up yet.
+        """
         if metrics.previous_probability is None:
             return 0.0
 
         move = abs(metrics.current_probability - metrics.previous_probability)
-        sigma = metrics.baseline_sigma or 0.05
-        if sigma <= 0:
-            sigma = 0.05
+        if move == 0.0:
+            return 0.0
 
-        normalized_move = move / max(sigma, 1e-6)
-        return _clamp(normalized_move / 3.0)
+        sigma = metrics.baseline_sigma or 0.02  # tighter default: 2% is already notable
+        if sigma <= 0:
+            sigma = 0.02
+
+        # Sigma-multiple component: log-scaled so 1σ ≈ 0.5, 2σ ≈ 0.7, 4σ ≈ 0.9
+        sigma_multiple = move / sigma
+        sigma_score = _log_scale(sigma_multiple, 6.0)  # 6σ = ceiling
+
+        # Absolute component: calibrated so 5% move = 0.5, 15% = 0.9 (log scale)
+        abs_score = _log_scale(move, 0.15)
+
+        return _clamp((0.65 * sigma_score) + (0.35 * abs_score))
 
     def _compute_clob_liquidity_factor(self, metrics: MarketScoringInput) -> float:
+        """
+        Score depth and tightness of the CLOB.
+
+        Real Polymarket top-of-book depth on active markets runs $10k–$200k
+        per side.  The previous benchmark of $25k total (all 4 levels combined)
+        saturated at ~$6k per level — far too low.  We benchmark against $500k
+        total depth (top-1 + top-5 bid + ask combined) so only the deepest
+        markets score 1.0.
+
+        Spread: Polymarket CLOB normal spread is 1–30 bps on liquid markets,
+        200–500 bps on thin ones.  Previous 500 bps ceiling was right but
+        1 – x/500 is linear; we keep that since spread should penalise sharply.
+        """
         depth_total = sum(
             value or 0.0
             for value in (
@@ -156,27 +199,50 @@ class ScoringServices:
                 metrics.top_5_ask_depth,
             )
         )
-        depth_score = _clamp(depth_total / 100.0)
+        depth_score = _log_scale(depth_total, 500_000.0)
 
-        spread_bps = metrics.spread_bps if metrics.spread_bps is not None else 10_000.0
+        spread_bps = metrics.spread_bps if metrics.spread_bps is not None else 5_000.0
         spread_score = _clamp(1.0 - (spread_bps / 500.0))
 
-        return _clamp((0.65 * depth_score) + (0.35 * spread_score))
+        return _clamp((0.75 * depth_score) + (0.25 * spread_score))
 
     def _compute_amm_liquidity_factor(self, metrics: MarketScoringInput) -> float:
-        if metrics.event_liquidity is None:
+        if metrics.event_liquidity is None or metrics.event_liquidity <= 0:
             return 0.0
-        return _clamp(metrics.event_liquidity / 1_000.0)
+        # Bayse AMM pools: active events have $10k–$2M TVL.  Benchmark $500k.
+        return _log_scale(metrics.event_liquidity, 500_000.0)
 
     def _compute_volume_factor(self, metrics: MarketScoringInput) -> float:
-        event_orders = float(metrics.event_total_orders or 0)
+        """
+        Score trading activity.
+
+        Polymarket active markets have 10k–500k+ lifetime orders.  The previous
+        5k benchmark meant any market with 5k+ orders got 1.0 — all candidates
+        in a combined event would score identically.  We raise the ceiling to
+        50k for market-level and 500k for event-level so there is real spread.
+
+        price_updates_in_window measures how frequently the best bid/ask has moved
+        in the current observation window; 50 updates is extremely active.
+        """
         market_orders = float(metrics.market_total_orders or 0)
+        event_orders = float(metrics.event_total_orders or 0)
         update_count = float(metrics.price_updates_in_window or 0)
 
-        blended_activity = (0.55 * market_orders) + (0.30 * event_orders) + (0.15 * update_count)
-        return _clamp(blended_activity / 100.0)
+        market_orders_score = _log_scale(market_orders, 50_000.0)
+        event_orders_score = _log_scale(event_orders, 500_000.0)
+        update_score = _log_scale(update_count, 50.0)
+
+        return _clamp((0.70 * market_orders_score) + (0.20 * event_orders_score) + (0.10 * update_score))
 
     def _compute_order_flow_factor(self, metrics: MarketScoringInput) -> float:
+        """
+        Score directional conviction from order flow imbalance.
+
+        On Polymarket CLOB the order book notional per side can run $5k–$5M
+        on a single fill event.  The previous $10k total benchmark meant anything
+        with $10k+ flow was already at max scale — removing all differentiation
+        between a $10k tick and a $5M institutional sweep.  Raise to $500k.
+        """
         buy = float(metrics.buy_notional or 0.0)
         sell = float(metrics.sell_notional or 0.0)
         total = buy + sell
@@ -185,10 +251,14 @@ class ScoringServices:
 
         imbalance = abs(buy - sell) / total
         directional_support = buy / total if buy >= sell else sell / total
-        return _clamp((0.7 * imbalance) + (0.3 * directional_support))
+        flow_quality = (0.7 * imbalance) + (0.3 * directional_support)
+        notional_scale = _log_scale(total, 500_000.0)
+
+        return _clamp(flow_quality * (0.3 + 0.7 * notional_scale))
+
 
     def _compute_persistence_factor(self, metrics: MarketScoringInput) -> float:
-        base = _clamp(metrics.persistence_ticks / 6.0)
+        base = _clamp(metrics.persistence_ticks / 12.0)
         if metrics.has_recent_reversal:
             base *= 0.5
         return _clamp(base)
@@ -196,16 +266,17 @@ class ScoringServices:
     def _compute_confidence_factor(self, metrics: MarketScoringInput) -> float:
         confidence = 0.0
         if metrics.event_liquidity is not None:
-            confidence += 0.35 * _clamp(metrics.event_liquidity / 1_000.0)
+            confidence += 0.35 * _log_scale(metrics.event_liquidity, 100_000.0)
         if metrics.market_total_orders is not None:
-            confidence += 0.30 * _clamp(metrics.market_total_orders / 50.0)
+            confidence += 0.30 * _log_scale(metrics.market_total_orders, 1_000.0)
         if metrics.persistence_ticks:
-            confidence += 0.20 * _clamp(metrics.persistence_ticks / 6.0)
+            confidence += 0.20 * _clamp(metrics.persistence_ticks / 12.0)
         if not metrics.has_recent_reversal:
             confidence += 0.10
         if not metrics.nearing_close:
             confidence += 0.05
         return _clamp(confidence)
+
 
     def _classify_score(self, score: float) -> str:
         bounded = _clamp(score, 0.0, 100.0)

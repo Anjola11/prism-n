@@ -10,8 +10,8 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 engine = create_async_engine(
     url=Config.DATABASE_URL,
     echo=False,
-    pool_size=8,
-    max_overflow=4,
+    pool_size=10,
+    max_overflow=10,
     pool_timeout=10.0,
     pool_pre_ping=True,
     pool_recycle=300,

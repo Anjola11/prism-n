@@ -213,6 +213,19 @@ class LiveStateServices:
             )
         )
 
+    async def set_asset_mappings_bulk(self, states: list[AssetMappingLiveState]) -> None:
+        if not states or not self.redis:
+            return
+        pipe = self.redis.pipeline()
+        for state in states:
+            pipe.set(
+                self.asset_mapping_key(source=state.source, asset_id=state.asset_id),
+                state.model_dump_json(),
+                ex=259200,
+            )
+        await self._execute_redis(pipe.execute())
+
+
     async def get_asset_mapping(
         self,
         *,
@@ -267,6 +280,8 @@ class LiveStateServices:
         updated = EventLiveState(**data)
         await self.set_event_state(updated)
         return updated
+
+    PUBSUB_CHANNEL = "prism:events:stream"
 
     async def set_market_state(self, state: MarketLiveState) -> None:
         await self._execute_redis(
@@ -324,9 +339,27 @@ class LiveStateServices:
         data["last_updated_at"] = utc_now_iso()
         updated = MarketLiveState(**data)
         await self.set_market_state(updated)
+
+        try:
+            await self._execute_redis(
+                self.redis.publish(
+                    self.PUBSUB_CHANNEL,
+                    json.dumps({
+                        "type": "market_update",
+                        "event_id": updated.event_id,
+                        "market_id": updated.market_id,
+                        "source": updated.source.value if hasattr(updated.source, "value") else str(updated.source),
+                        "current_probability": updated.current_probability,
+                        "previous_probability": updated.previous_probability,
+                        "total_liquidity": updated.event_liquidity,
+                        "timestamp": updated.last_updated_at,
+                    })
+                )
+            )
+        except Exception:
+            pass
+
         return updated
-
-
 
     async def set_signal_state(self, state: SignalLiveState) -> None:
         await self._execute_redis(
@@ -336,6 +369,24 @@ class LiveStateServices:
                 ex=259200,
             )
         )
+        try:
+            await self._execute_redis(
+                self.redis.publish(
+                    self.PUBSUB_CHANNEL,
+                    json.dumps({
+                        "type": "signal_update",
+                        "event_id": state.event_id,
+                        "market_id": state.market_id,
+                        "source": state.source.value if hasattr(state.source, "value") else str(state.source),
+                        "score": state.score,
+                        "classification": state.classification,
+                        "direction": state.direction,
+                        "timestamp": state.scored_at,
+                    })
+                )
+            )
+        except Exception:
+            pass
 
     async def get_signal_state(
         self,
@@ -364,6 +415,24 @@ class LiveStateServices:
                 ex=259200,
             )
         )
+
+    async def set_subscription_states_bulk(self, states: list[SubscriptionLiveState]) -> None:
+        if not states or not self.redis:
+            return
+        pipe = self.redis.pipeline()
+        for state in states:
+            pipe.set(
+                self.subscription_key(
+                    source=state.source,
+                    channel=state.channel,
+                    event_id=state.event_id,
+                    market_id=state.market_id,
+                ),
+                state.model_dump_json(),
+                ex=259200,
+            )
+        await self._execute_redis(pipe.execute())
+
 
     async def get_subscription_state(
         self,

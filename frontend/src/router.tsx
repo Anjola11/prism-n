@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { Suspense, lazy } from 'react';
 import { createRouter, createRoute, createRootRoute, Outlet } from '@tanstack/react-router';
 import { LandingPage } from './pages/LandingPage';
 import { SignupPage } from './pages/auth/SignupPage';
@@ -10,13 +10,15 @@ import { AppLayout } from './components/layout/AppLayout';
 import { AdminLayout } from './components/layout/AdminLayout';
 import { DiscoveryPage } from './pages/app/DiscoveryPage';
 import { TrackerPage } from './pages/app/TrackerPage';
-import { EventDetail } from './pages/app/EventDetail';
-import { AdminLoginPage } from './pages/admin/AdminLoginPage';
-import { AdminOverviewPage } from './pages/admin/AdminOverviewPage';
-import { AdminDiscoveryPage } from './pages/admin/AdminDiscoveryPage';
-import { AdminSystemTrackerPage } from './pages/admin/AdminSystemTrackerPage';
+
+const EventDetail = lazy(() => import('./pages/app/EventDetail').then((m) => ({ default: m.EventDetail })));
+const AdminLoginPage = lazy(() => import('./pages/admin/AdminLoginPage').then((m) => ({ default: m.AdminLoginPage })));
+const AdminOverviewPage = lazy(() => import('./pages/admin/AdminOverviewPage').then((m) => ({ default: m.AdminOverviewPage })));
+const AdminDiscoveryPage = lazy(() => import('./pages/admin/AdminDiscoveryPage').then((m) => ({ default: m.AdminDiscoveryPage })));
+const AdminSystemTrackerPage = lazy(() => import('./pages/admin/AdminSystemTrackerPage').then((m) => ({ default: m.AdminSystemTrackerPage })));
 
 const adminBasePath = import.meta.env.VITE_ADMIN_ROUTE_PREFIX || '/control-room';
+
 
 export const rootRoute = createRootRoute({
   component: () => <Outlet />,
@@ -79,7 +81,11 @@ export const appRoute = createRoute({
 export const adminLoginRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: `${adminBasePath}/login`,
-  component: AdminLoginPage,
+  component: () => (
+    <Suspense fallback={<div className="h-64 animate-pulse rounded-xl border border-border bg-card" />}>
+      <AdminLoginPage />
+    </Suspense>
+  ),
 });
 
 export const adminRoute = createRoute({
@@ -103,7 +109,11 @@ export const trackerRoute = createRoute({
 export const analysisRoute = createRoute({
   getParentRoute: () => appRoute,
   path: '/events/$eventId',
-  component: EventDetail,
+  component: () => (
+    <Suspense fallback={<div className="h-64 animate-pulse rounded-xl border border-border bg-card" />}>
+      <EventDetail />
+    </Suspense>
+  ),
   validateSearch: (search: Record<string, unknown>) => ({
     source: (search.source as string) || '',
     origin: (search.origin as string) || '',
@@ -114,19 +124,31 @@ const appRouteWithChildren = appRoute.addChildren([discoverRoute, trackerRoute, 
 const adminIndexRoute = createRoute({
   getParentRoute: () => adminRoute,
   path: '/',
-  component: AdminOverviewPage,
+  component: () => (
+    <Suspense fallback={<div className="h-64 animate-pulse rounded-xl border border-border bg-card" />}>
+      <AdminOverviewPage />
+    </Suspense>
+  ),
 });
 
 const adminDiscoveryRoute = createRoute({
   getParentRoute: () => adminRoute,
   path: '/discovery',
-  component: AdminDiscoveryPage,
+  component: () => (
+    <Suspense fallback={<div className="h-64 animate-pulse rounded-xl border border-border bg-card" />}>
+      <AdminDiscoveryPage />
+    </Suspense>
+  ),
 });
 
 const adminSystemTrackerRoute = createRoute({
   getParentRoute: () => adminRoute,
   path: '/system-tracker',
-  component: AdminSystemTrackerPage,
+  component: () => (
+    <Suspense fallback={<div className="h-64 animate-pulse rounded-xl border border-border bg-card" />}>
+      <AdminSystemTrackerPage />
+    </Suspense>
+  ),
 });
 
 const adminRouteWithChildren = adminRoute.addChildren([

@@ -85,12 +85,34 @@ export const marketsApi = {
     });
     return unwrap(response);
   },
+  getBulkScoreHistory: async (
+    eventIds: string[],
+    hours = 48,
+    currency = DEFAULT_CURRENCY,
+    source?: string,
+  ): Promise<Record<string, ScoreHistoryApi>> => {
+    if (!eventIds.length) return {};
+    const response = await api.post('/events/score-history/bulk', {
+      event_ids: eventIds,
+      hours,
+      currency,
+      source,
+    }, { timeout: 45000 });
+    return unwrap(response);
+  },
   trackEvent: async (eventId: string, currency = DEFAULT_CURRENCY, source?: string): Promise<any> => {
     const response = await api.post(`/track/${eventId}`, null, { params: { currency, source } });
     return unwrap(response);
   },
   untrackEvent: async (eventId: string, currency = DEFAULT_CURRENCY, source?: string): Promise<any> => {
     const response = await api.delete(`/track/${eventId}`, { params: { currency, source } });
+    return unwrap(response);
+  },
+  refreshEvent: async (eventId: string, currency = DEFAULT_CURRENCY, source?: string): Promise<{ refreshed: number; total?: number; note?: string }> => {
+    const response = await api.post(`/events/${eventId}/refresh`, null, {
+      params: { currency, source },
+      timeout: 30000,
+    });
     return unwrap(response);
   },
   getTrackerPage: async (

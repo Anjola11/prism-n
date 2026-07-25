@@ -41,6 +41,9 @@ class AssetBinding:
 class PolymarketWebSocketManager:
     WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
     SUBSCRIPTION_BATCH_SIZE = 100
+    # If no frame is received within this window the connection is considered stale
+    # and we actively close + reconnect rather than waiting for a TCP timeout.
+    MESSAGE_TIMEOUT_SECONDS = 120
 
     def __init__(
         self,
@@ -77,6 +80,7 @@ class PolymarketWebSocketManager:
         self._asset_books: dict[str, dict[str, Any]] = {}
         self._baseline_cache: dict[tuple[str, str], float | None] = {}
         self._last_message_at: str | None = None
+        self._last_message_monotonic: float = 0.0
         self._last_connect_at: str | None = None
         self._reconnect_count: int = 0
         self._last_error: str | None = None
@@ -171,19 +175,21 @@ class PolymarketWebSocketManager:
 
     async def _handle_connection(self, ws: ClientConnection) -> None:
         self._active_asset_ids.clear()
-        await self._sync_subscriptions()
-        await self._resync_tracked_markets_from_rest()
+        self._last_message_monotonic = asyncio.get_event_loop().time()
+        self._ping_task = asyncio.create_task(
+            self._ping_and_watchdog_loop(ws),
+            name="polymarket-websocket-ping",
+        )
         self._subscription_sync_task = asyncio.create_task(
             self._subscription_sync_loop(),
             name="polymarket-websocket-subscription-sync",
         )
-        self._ping_task = asyncio.create_task(
-            self._ping_loop(),
-            name="polymarket-websocket-ping",
-        )
+        await self._sync_subscriptions()
+        await self._resync_tracked_markets_from_rest()
 
         try:
             async for raw_frame in ws:
+                self._last_message_monotonic = asyncio.get_event_loop().time()
                 await self._handle_raw_frame(raw_frame)
         finally:
             for task in (self._subscription_sync_task, self._ping_task):
@@ -197,12 +203,41 @@ class PolymarketWebSocketManager:
             self._ping_task = None
             await self._mark_active_subscriptions_inactive()
 
-    async def _ping_loop(self) -> None:
+    async def _ping_and_watchdog_loop(self, ws: ClientConnection) -> None:
+        """Send periodic PING frames AND enforce a message-timeout watchdog.
+
+        If we have not received any frame from Polymarket within MESSAGE_TIMEOUT_SECONDS
+        the connection is considered silently stale (TCP still up but server stopped
+        sending).  We actively close the socket which causes the `async for` iterator
+        in _handle_connection to exit, which triggers a reconnect from run().
+        """
+        loop = asyncio.get_event_loop()
         while not self._stop_event.is_set() and self._ws:
             await asyncio.sleep(self.ping_interval_seconds)
             if self._stop_event.is_set() or not self._ws:
                 return
-            await self._ws.send("PING")
+
+            # Watchdog check
+            idle_seconds = loop.time() - self._last_message_monotonic
+            if idle_seconds > self.MESSAGE_TIMEOUT_SECONDS:
+                logger.warning(
+                    "Polymarket WS message timeout: no frame in %.0fs (threshold %ds). "
+                    "Closing connection to force reconnect.",
+                    idle_seconds,
+                    self.MESSAGE_TIMEOUT_SECONDS,
+                )
+                self._last_error = f"Message timeout after {idle_seconds:.0f}s"
+                try:
+                    await ws.close()
+                except Exception:
+                    pass
+                return
+
+            # Normal PING
+            try:
+                await ws.send("PING")
+            except Exception:
+                return
 
     async def _subscription_sync_loop(self) -> None:
         while not self._stop_event.is_set() and self._ws:
@@ -224,25 +259,6 @@ class PolymarketWebSocketManager:
         desired_asset_ids = set(desired_bindings)
 
         self._asset_bindings = desired_bindings
-
-        logger.info("Syncing Polymarket asset mappings count=%s", len(desired_bindings))
-        mapping_tasks = [
-            self.live_state.set_asset_mapping(
-                AssetMappingLiveState(
-                    source=MarketSource.POLYMARKET,
-                    asset_id=binding.asset_id,
-                    event_id=binding.event_id,
-                    market_id=binding.market_id,
-                    currency=binding.currency,
-                    outcome_side=binding.outcome_side,
-                )
-            )
-            for binding in desired_bindings.values()
-        ]
-        for start in range(0, len(mapping_tasks), 10):
-            await asyncio.gather(*mapping_tasks[start:start + 10])
-        logger.info("Finished syncing Polymarket asset mappings")
-
         to_unsubscribe = sorted(self._active_asset_ids - desired_asset_ids)
         to_subscribe = sorted(desired_asset_ids - self._active_asset_ids)
 
@@ -281,20 +297,31 @@ class PolymarketWebSocketManager:
                 await asyncio.sleep(0.05)
             self._active_asset_ids |= set(to_subscribe)
 
-        subscription_tasks = [
-            self.live_state.set_subscription_state(
-                SubscriptionLiveState(
-                    source=MarketSource.POLYMARKET,
-                    event_id=binding.event_id,
-                    market_id=binding.market_id,
-                    channel=f"market:{binding.asset_id}",
-                    active=binding.asset_id in self._active_asset_ids,
-                )
+        logger.info("Syncing Polymarket asset mappings & subscription states count=%s", len(desired_bindings))
+        mapping_states = [
+            AssetMappingLiveState(
+                source=MarketSource.POLYMARKET,
+                asset_id=binding.asset_id,
+                event_id=binding.event_id,
+                market_id=binding.market_id,
+                currency=binding.currency,
+                outcome_side=binding.outcome_side,
             )
             for binding in desired_bindings.values()
         ]
-        for start in range(0, len(subscription_tasks), 10):
-            await asyncio.gather(*subscription_tasks[start:start + 10])
+        await self.live_state.set_asset_mappings_bulk(mapping_states)
+
+        subscription_states = [
+            SubscriptionLiveState(
+                source=MarketSource.POLYMARKET,
+                event_id=binding.event_id,
+                market_id=binding.market_id,
+                channel=f"market:{binding.asset_id}",
+                active=binding.asset_id in self._active_asset_ids,
+            )
+            for binding in desired_bindings.values()
+        ]
+        await self.live_state.set_subscription_states_bulk(subscription_states)
 
         logger.info(
             "Polymarket websocket subscription sync complete assets=%s active=%s",
@@ -302,6 +329,7 @@ class PolymarketWebSocketManager:
             len(self._active_asset_ids),
         )
         self._last_subscription_plan_version = plan_version
+
 
     async def _load_tracked_asset_bindings(self) -> tuple[dict[str, AssetBinding], str]:
         cached_plan = await self.live_state.get_subscription_plan(identifier=MarketSource.POLYMARKET.value)
