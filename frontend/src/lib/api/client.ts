@@ -7,7 +7,11 @@ function resolveApiBaseUrl(): string {
 
   const envBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim();
   if (envBaseUrl) {
-    return envBaseUrl;
+    const cleanUrl = envBaseUrl.replace(/\/+$/, '');
+    if (!cleanUrl.endsWith('/api/v1')) {
+      return `${cleanUrl}/api/v1`;
+    }
+    return cleanUrl;
   }
 
   return '/api/v1';

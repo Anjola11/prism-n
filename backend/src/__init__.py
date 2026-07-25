@@ -105,15 +105,25 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-origins = Config.ALLOWED_ORIGINS 
+origins = [str(o).strip() for o in Config.ALLOWED_ORIGINS if o]
+has_wildcard = "*" in origins or not origins
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins = origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+if has_wildcard:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=r"https?://.*",
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+else:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 app.add_middleware(
     GZipMiddleware,
@@ -231,6 +241,20 @@ async def custom_validation_exception_handler(request:Request, exc: RequestValid
     )
 
 
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error("Unhandled server exception on %s %s: %s", request.method, request.url.path, exc, exc_info=True)
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={
+            "success": False,
+            "message": "An internal server error occurred",
+            "data": None,
+        },
+    )
+
+
 app.include_router(auth_router, prefix="/api/v1/auth", tags=["Authentication"])
 app.include_router(admin_router, prefix="/api/v1/admin", tags=["Admin"])
 app.include_router(markets_router, prefix="/api/v1", tags=["Markets"])
+
